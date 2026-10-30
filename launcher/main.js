@@ -5,13 +5,41 @@ const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const userData = app.getPath('userData');
-const versionFile = path.join(userData, 'version.json');
-const gameDir = path.join(userData, 'game');
+const settingsFile = path.join(userData, 'settings.json');
+const defaultGameDir = path.join(userData, 'game');
+
+function readSettings() {
+  try { return JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch { return {}; }
+}
+function writeSettings(s) { fs.writeFileSync(settingsFile, JSON.stringify(s, null, 2)); }
+function getGameDir() {
+  const s = readSettings();
+  if (s.installDir && fs.existsSync(s.installDir)) return s.installDir;
+  return defaultGameDir;
+}
+function setGameDir(newDir) {
+  const oldDir = getGameDir();
+  fs.mkdirSync(newDir, { recursive: true });
+  // migrate files
+  for (const f of ['zn-client.exe', 'version.json']) {
+    const src = path.join(oldDir, f);
+    const dst = path.join(newDir, f);
+    if (fs.existsSync(src) && !fs.existsSync(dst)) {
+      try { fs.renameSync(src, dst); } catch { fs.copyFileSync(src, dst); try { fs.unlinkSync(src); } catch {} }
+    }
+  }
+  const s = readSettings();
+  s.installDir = newDir;
+  writeSettings(s);
+  return newDir;
+}
+const versionFile = () => path.join(getGameDir(), 'version.json');
+const gameDir = () => getGameDir();
 
 function readVersion() {
-  try { return JSON.parse(fs.readFileSync(versionFile, 'utf8')); } catch { return { version: '0.0.0', files: [] }; }
+  try { return JSON.parse(fs.readFileSync(versionFile(), 'utf8')); } catch { return { version: '0.0.0', files: [] }; }
 }
-function writeVersion(v) { fs.writeFileSync(versionFile, JSON.stringify(v, null, 2)); }
+function writeVersion(v) { fs.writeFileSync(versionFile(), JSON.stringify(v, null, 2)); }
 
 function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
 
@@ -47,11 +75,11 @@ ipcMain.handle('check-update', async (_e, channel) => {
 });
 
 ipcMain.handle('download-update', async (e, manifest) => {
-  ensureDir(gameDir);
+  ensureDir(getGameDir());
   const total = manifest.files.length;
   for (let i = 0; i < total; i++) {
     const f = manifest.files[i];
-    const dest = path.join(gameDir, f.path);
+    const dest = path.join(getGameDir(), f.path);
     ensureDir(path.dirname(dest));
     // download
     let buf;
@@ -88,7 +116,7 @@ ipcMain.handle('download-update', async (e, manifest) => {
 });
 
 ipcMain.handle('launch-game', async (_e, opts) => {
-  const exe = path.join(gameDir, 'zn-client.exe');
+  const exe = path.join(getGameDir(), 'zn-client.exe');
   const args = [];
   if (opts && opts.server) { args.push('--server', opts.server); }
   if (opts && opts.port) { args.push('--port', String(opts.port)); }
@@ -100,6 +128,17 @@ ipcMain.handle('launch-game', async (_e, opts) => {
 });
 
 ipcMain.handle('get-local-version', () => readVersion());
+ipcMain.handle('get-install-dir', async () => getGameDir());
+ipcMain.handle('pick-install-dir', async () => {
+  const res = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  if (res.canceled || !res.filePaths.length) return null;
+  return res.filePaths[0];
+});
+ipcMain.handle('set-install-dir', async (_e, newDir) => {
+  if (!newDir) return { ok: false, error: 'no path' };
+  const p = setGameDir(newDir);
+  return { ok: true, path: p };
+});
 
 function createWindow() {
   const win = new BrowserWindow({

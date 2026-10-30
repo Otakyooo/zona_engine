@@ -6,6 +6,26 @@ const progressBar = document.getElementById('progress-bar');
 const progressText = document.getElementById('progress-text');
 const versionEl = document.getElementById('version');
 const localVersionEl = document.getElementById('local-version');
+const installDirEl = document.getElementById('install-dir');
+const changeDirBtn = document.getElementById('change-dir');
+
+async function refreshInstallDir() {
+  const dir = await window.zona.getInstallDir();
+  installDirEl.textContent = dir;
+}
+
+changeDirBtn.addEventListener('click', async () => {
+  const picked = await window.zona.pickInstallDir();
+  if (picked) {
+    const res = await window.zona.setInstallDir(picked);
+    if (res.ok) {
+      await refreshInstallDir();
+      statusEl.textContent = 'Install dir changed to ' + res.path;
+    } else {
+      statusEl.textContent = 'Error: ' + res.error;
+    }
+  }
+});
 const serverInput = document.getElementById('server');
 serverInput.value = localStorage.getItem('server') || '192.168.0.255';
 serverInput.addEventListener('change', () => localStorage.setItem('server', serverInput.value));
@@ -22,6 +42,7 @@ window.zona.onProgress((data) => {
 async function init() {
   const local = await window.zona.getLocalVersion();
   localVersionEl.textContent = 'local: ' + (local.version || 'none');
+  await refreshInstallDir();
   newsEl.textContent = 'Welcome to ZONA. Checking for updates...';
   // auto-check updates
   try {
@@ -59,6 +80,11 @@ playBtn.addEventListener('click', async () => {
     statusEl.textContent = 'Game launched.';
   } catch (e) {
     statusEl.textContent = 'Error: ' + e.message;
+  }
+});
+
+init();
+statusEl.textContent = 'Error: ' + e.message;
   }
 });
 
