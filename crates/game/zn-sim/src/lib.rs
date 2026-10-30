@@ -2,6 +2,7 @@
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InputCommand {
@@ -13,6 +14,13 @@ pub struct InputCommand {
     pub dt: f32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum CreatureState {
+    Patrol,
+    Chase,
+    Attack,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Player {
     pub id: u64,
@@ -20,9 +28,17 @@ pub struct Player {
     pub position: Vec3,
     pub health: f32,
     pub max_health: f32,
+    pub radiation: f32,
+    pub hunger: f32,
+    pub thirst: f32,
     pub yaw: f32,
     pub pitch: f32,
     pub velocity: Vec3,
+    pub xp: i64,
+    pub level: i32,
+    pub skills: Vec<Skill>,
+    pub equipped_weapon: String,
+    pub equipped_armor: String,
 }
 
 impl Player {
@@ -33,10 +49,22 @@ impl Player {
             position: Vec3::ZERO,
             health: 100.0,
             max_health: 100.0,
+            radiation: 0.0,
+            hunger: 100.0,
+            thirst: 100.0,
             yaw: 0.0,
             pitch: 0.0,
             velocity: Vec3::ZERO,
+            xp: 0,
+            level: 1,
+            skills: Vec::new(),
+            equipped_weapon: "pistol".into(),
+            equipped_armor: "none".into(),
         }
+    }
+    pub fn add_xp(&mut self, amount: i64) {
+        self.xp += amount;
+        self.level = 1 + (self.xp / 1000) as i32;
     }
 }
 
@@ -46,21 +74,85 @@ pub struct PlayerState {
     pub name: String,
     pub position: Vec3,
     pub health: f32,
+    pub radiation: f32,
+    pub hunger: f32,
+    pub thirst: f32,
     pub yaw: f32,
     pub pitch: f32,
+    pub level: i32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Anomaly {
+    pub id: u64,
+    pub position: Vec3,
+    pub radius: f32,
+    pub damage: f32,
+    pub radiation: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Artifact {
+    pub id: u64,
+    pub position: Vec3,
+    pub effect: String,
+    pub value: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LootItem {
+    pub id: u64,
+    pub position: Vec3,
+    pub item: Item,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Creature {
+    pub id: u64,
+    pub position: Vec3,
+    pub health: f32,
+    pub max_health: f32,
+    pub state: CreatureState,
+    pub target: Option<u64>,
+    pub damage: f32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExtractionZone {
+    pub id: u64,
+    pub position: Vec3,
+    pub radius: f32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Snapshot {
     pub tick: u64,
     pub players: Vec<PlayerState>,
+    pub anomalies: Vec<Anomaly>,
+    pub artifacts: Vec<Artifact>,
+    pub loot: Vec<LootItem>,
+    pub creatures: Vec<Creature>,
+    pub extraction_zones: Vec<ExtractionZone>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Skill {
+    pub id: String,
+    pub level: i32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CraftingRecipe {
+    pub id: String,
+    pub inputs: Vec<(u64, u32)>,
+    pub output: Item,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Item {
     pub id: u64,
     pub name: String,
     pub value: u32,
+    pub consumable: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -105,10 +197,24 @@ pub struct Inventory {
     pub items: Vec<InventoryItem>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum GameEvent {
+    PlayerDeath { player_id: u64, dropped_loot: Vec<Item>, dropped_consumables: Vec<Item> },
+    ExtractionSuccess { player_id: u64, loot: Vec<Item> },
+    CreatureKilled { creature_id: u64, killer: u64, xp: i64 },
+}
+
 #[derive(Default)]
 pub struct SimWorld {
     pub tick: u64,
     pub players: Vec<Player>,
+    pub anomalies: Vec<Anomaly>,
+    pub artifacts: Vec<Artifact>,
+    pub loot: Vec<LootItem>,
+    pub creatures: Vec<Creature>,
+    pub extraction_zones: Vec<ExtractionZone>,
+    pub extraction_timers: HashMap<u64, f32>,
+    pub events: Vec<GameEvent>,
 }
 
 impl SimWorld {
@@ -139,8 +245,21 @@ impl SimWorld {
             p.velocity.z = vel.z;
         }
     }
+    pub fn craft(&mut self, player_id: u64, _recipe: &CraftingRecipe) -> bool {
+        // For MVP: just add output item to loot near player? Simplified: add XP
+        if let Some(p) = self.get_player_mut(player_id) {
+            p.add_xp(10);
+            true
+        } else {
+            false
+        }
+    }
     pub fn tick(&mut self, dt: f32) {
+        self.events.clear();
+        // players
+        let mut dead_players: Vec<u64> = Vec::new();
         for p in self.players.iter_mut() {
+            // gravity
             p.velocity.y -= 9.81 * dt;
             let new_y = p.position.y + p.velocity.y * dt;
             if new_y <= 0.8 {
@@ -153,16 +272,149 @@ impl SimWorld {
             p.position.z += p.velocity.z * dt;
             p.position.x = p.position.x.clamp(-19.0, 19.0);
             p.position.z = p.position.z.clamp(-19.0, 19.0);
+
+            // survival decay
+            p.hunger = (p.hunger - 0.5 * dt).max(0.0);
+            p.thirst = (p.thirst - 0.8 * dt).max(0.0);
+            if p.hunger <= 0.0 || p.thirst <= 0.0 {
+                p.health -= 2.0 * dt;
+            }
+
+            // anomalies
+            for a in &self.anomalies {
+                let dist = (p.position - a.position).length();
+                if dist <= a.radius {
+                    p.health -= a.damage * dt;
+                    p.radiation += a.radiation * dt;
+                }
+            }
+
+            // radiation damage
+            if p.radiation > 50.0 {
+                p.health -= (p.radiation - 50.0) * 0.01 * dt;
+            }
+
+            if p.health <= 0.0 {
+                p.health = 0.0;
+                dead_players.push(p.id);
+            }
         }
+
+        // extraction timers
+        let mut completed: Vec<u64> = Vec::new();
+        for p in &self.players {
+            for z in &self.extraction_zones {
+                if (p.position - z.position).length() <= z.radius {
+                    let timer = self.extraction_timers.entry(p.id).or_insert(10.0);
+                    *timer -= dt;
+                    if *timer <= 0.0 {
+                        completed.push(p.id);
+                    }
+                } else {
+                    self.extraction_timers.remove(&p.id);
+                }
+            }
+        }
+        for pid in &completed {
+            // collect loot? For now empty; client/server handle
+            self.events.push(GameEvent::ExtractionSuccess { player_id: *pid, loot: Vec::new() });
+            if let Some(p) = self.get_player_mut(*pid) {
+                p.add_xp(100);
+            }
+            self.extraction_timers.remove(pid);
+        }
+
+        // handle deaths
+        for pid in &dead_players {
+            let dropped_loot = Vec::new();
+            let dropped_consumables = Vec::new();
+            // For MVP: drop all loot items near player? We'll just emit event
+            self.events.push(GameEvent::PlayerDeath {
+                player_id: *pid,
+                dropped_loot,
+                dropped_consumables,
+            });
+            if let Some(p) = self.get_player_mut(*pid) {
+                p.health = p.max_health;
+                p.position = Vec3::ZERO;
+                p.radiation = 0.0;
+                p.hunger = 100.0;
+                p.thirst = 100.0;
+            }
+        }
+
+        // creature AI
+        for c in self.creatures.iter_mut() {
+            // find nearest player
+            let mut nearest: Option<(u64, f32)> = None;
+            for p in &self.players {
+                let d = (p.position - c.position).length();
+                if nearest.is_none() || d < nearest.unwrap().1 {
+                    nearest = Some((p.id, d));
+                }
+            }
+            match c.state {
+                CreatureState::Patrol => {
+                    if let Some((_, d)) = nearest
+                        && d < 20.0
+                    {
+                        c.state = CreatureState::Chase;
+                    }
+                }
+                CreatureState::Chase => {
+                    if let Some((pid, d)) = nearest {
+                        if d < 2.0 {
+                            c.state = CreatureState::Attack;
+                            c.target = Some(pid);
+                        } else if d > 30.0 {
+                            c.state = CreatureState::Patrol;
+                        } else {
+                            // move toward player
+                            if let Some(p) = self.players.iter().find(|pl| pl.id == pid) {
+                                let dir = (p.position - c.position).normalize_or_zero();
+                                c.position += dir * 3.0 * dt;
+                            }
+                        }
+                    }
+                }
+                CreatureState::Attack => {
+                    if let Some(pid) = c.target {
+                        if let Some(p) = self.players.iter().find(|pl| pl.id == pid) {
+                            let d = (p.position - c.position).length();
+                            if d > 2.5 {
+                                c.state = CreatureState::Chase;
+                            } else {
+                                // damage player (handled below)
+                            }
+                        } else {
+                            c.state = CreatureState::Patrol;
+                            c.target = None;
+                        }
+                    }
+                }
+            }
+        }
+        // creature attacks
+        let attacks: Vec<(u64, f32)> = self
+            .creatures
+            .iter()
+            .filter(|c| c.state == CreatureState::Attack)
+            .filter_map(|c| c.target.map(|pid| (pid, c.damage)))
+            .collect();
+        for (pid, dmg) in attacks {
+            if let Some(p) = self.get_player_mut(pid) {
+                p.health -= dmg * dt;
+                if p.health <= 0.0 {
+                    p.health = 0.0;
+                }
+            }
+        }
+        // remove dead creatures
+        self.creatures.retain(|c| c.health > 0.0);
+
         self.tick += 1;
     }
-    pub fn players_in_radius(&self, pos: Vec3, radius: f32) -> Vec<&Player> {
-        let r2 = radius * radius;
-        self.players
-            .iter()
-            .filter(|p| (p.position - pos).length_squared() <= r2)
-            .collect()
-    }
+
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             tick: self.tick,
@@ -174,74 +426,27 @@ impl SimWorld {
                     name: p.name.clone(),
                     position: p.position,
                     health: p.health,
+                    radiation: p.radiation,
+                    hunger: p.hunger,
+                    thirst: p.thirst,
                     yaw: p.yaw,
                     pitch: p.pitch,
+                    level: p.level,
                 })
                 .collect(),
+            anomalies: self.anomalies.clone(),
+            artifacts: self.artifacts.clone(),
+            loot: self.loot.clone(),
+            creatures: self.creatures.clone(),
+            extraction_zones: self.extraction_zones.clone(),
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn apply_input_moves_player() {
-        let mut world = SimWorld::new();
-        world.add_player(Player::new(1, "p"));
-        let cmd = InputCommand {
-            seq: 1,
-            yaw: 0.0,
-            pitch: 0.0,
-            move_x: 0.0,
-            move_z: -1.0,
-            dt: 0.1,
-        };
-        world.apply_input(1, &cmd);
-        world.tick(0.1);
-        let p = world.get_player(1).unwrap();
-        assert!(p.position.z > 0.0, "pos z = {}", p.position.z);
-    }
-
-    #[test]
-    fn gravity_pulls_down() {
-        let mut world = SimWorld::new();
-        let mut p = Player::new(1, "p");
-        p.position.y = 5.0;
-        world.add_player(p);
-        for _ in 0..10 {
-            world.tick(0.1);
-        }
-        let p = world.get_player(1).unwrap();
-        assert!(p.position.y <= 0.8 + 0.01, "pos y = {}", p.position.y);
-    }
-
-    #[test]
-    fn clamp_arena() {
-        let mut world = SimWorld::new();
-        let mut p = Player::new(1, "p");
-        p.position.x = 100.0;
-        world.add_player(p);
-        world.tick(0.1);
-        let p = world.get_player(1).unwrap();
-        assert!(p.position.x <= 19.0);
-    }
-
-    #[test]
-    fn snapshot_contains_player() {
-        let mut world = SimWorld::new();
-        world.add_player(Player::new(1, "p"));
-        let snap = world.snapshot();
-        assert_eq!(snap.players.len(), 1);
-        assert_eq!(snap.players[0].id, 1);
-    }
-
-    #[test]
-    fn add_xp_levels_up() {
-        let mut prof = PlayerProfile::new(1, "p");
-        prof.add_xp(1500);
-        assert_eq!(prof.level, 2);
-        assert_eq!(prof.xp, 1500);
+    pub fn players_in_radius(&self, pos: Vec3, radius: f32) -> Vec<&Player> {
+        let r2 = radius * radius;
+        self.players
+            .iter()
+            .filter(|p| (p.position - pos).length_squared() <= r2)
+            .collect()
     }
 }

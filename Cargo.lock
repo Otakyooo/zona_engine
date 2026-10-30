@@ -6833,6 +6833,7 @@ dependencies = [
  "argon2",
  "bincode",
  "env_logger",
+ "glam",
  "log",
  "password-hash",
  "serde_json",

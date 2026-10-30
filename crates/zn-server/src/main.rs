@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use glam::Vec3;
 use tokio::net::{TcpListener, tcp::OwnedWriteHalf};
 use tokio::sync::Mutex;
 use tokio::time::interval;
@@ -24,6 +25,39 @@ async fn main() -> anyhow::Result<()> {
     log::info!("zn-server listening TCP 7777, UDP 7778");
 
     let mut world = SimWorld::new();
+    // M4: spawn sample entities
+    world.anomalies.push(zn_sim::Anomaly {
+        id: 1,
+        position: Vec3::new(5.0, 0.0, 5.0),
+        radius: 3.0,
+        damage: 5.0,
+        radiation: 10.0,
+    });
+    world.artifacts.push(zn_sim::Artifact {
+        id: 1,
+        position: Vec3::new(5.0, 0.5, 5.0),
+        effect: "regen".into(),
+        value: 10,
+    });
+    world.loot.push(zn_sim::LootItem {
+        id: 1,
+        position: Vec3::new(2.0, 0.5, 2.0),
+        item: zn_sim::Item { id: 1, name: "Medkit".into(), value: 50, consumable: true },
+    });
+    world.creatures.push(zn_sim::Creature {
+        id: 1,
+        position: Vec3::new(10.0, 0.8, 10.0),
+        health: 50.0,
+        max_health: 50.0,
+        state: zn_sim::CreatureState::Patrol,
+        target: None,
+        damage: 5.0,
+    });
+    world.extraction_zones.push(zn_sim::ExtractionZone {
+        id: 1,
+        position: Vec3::new(18.0, 0.0, 18.0),
+        radius: 3.0,
+    });
     let mut writers: HashMap<u64, Arc<Mutex<OwnedWriteHalf>>> = HashMap::new();
     let mut tokens: HashMap<String, i64> = HashMap::new();
     let mut user_of_conn: HashMap<u64, i64> = HashMap::new();
@@ -163,10 +197,22 @@ async fn main() -> anyhow::Result<()> {
                             name: p.name.clone(),
                             position: p.position,
                             health: p.health,
+                            radiation: p.radiation,
+                            hunger: p.hunger,
+                            thirst: p.thirst,
                             yaw: p.yaw,
                             pitch: p.pitch,
+                            level: p.level,
                         }).collect();
-                        let snap = zn_sim::Snapshot { tick: world.tick, players: nearby };
+                        let snap = zn_sim::Snapshot {
+                            tick: world.tick,
+                            players: nearby,
+                            anomalies: world.anomalies.clone(),
+                            artifacts: world.artifacts.clone(),
+                            loot: world.loot.clone(),
+                            creatures: world.creatures.clone(),
+                            extraction_zones: world.extraction_zones.clone(),
+                        };
                         let pkt = ServerPacket::Snapshot(snap);
                         if let Ok(data) = bincode::serialize(&pkt) {
                             let _ = udp.socket.send_to(&data, *addr).await;

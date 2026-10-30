@@ -317,6 +317,24 @@ impl ApplicationHandler for App {
                                 .create_mesh(&cube.0, &cube.1),
                         );
                     }
+                    for c in &snap.creatures {
+                        let cube = make_cube(c.position + Vec3::new(0.0, 0.5, 0.0), 0.5, [0.8, 0.2, 0.2]);
+                        remote_meshes.push(
+                            self.renderer.as_ref().unwrap().create_mesh(&cube.0, &cube.1),
+                        );
+                    }
+                    for l in &snap.loot {
+                        let cube = make_cube(l.position, 0.3, [1.0, 1.0, 0.2]);
+                        remote_meshes.push(
+                            self.renderer.as_ref().unwrap().create_mesh(&cube.0, &cube.1),
+                        );
+                    }
+                    for a in &snap.anomalies {
+                        let cube = make_cube(a.position, a.radius, [0.2, 0.2, 0.8]);
+                        remote_meshes.push(
+                            self.renderer.as_ref().unwrap().create_mesh(&cube.0, &cube.1),
+                        );
+                    }
                 }
                 for m in &remote_meshes {
                     render_list.push(m);
