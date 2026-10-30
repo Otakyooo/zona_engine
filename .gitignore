@@ -1,6 +1,7 @@
 /target
 launcher/node_modules
 launcher/dist
+launcher/game
 *.pdb
 *.db
 *.db-journal

@@ -5,6 +5,7 @@ const playBtn = document.getElementById('play');
 const progressBar = document.getElementById('progress-bar');
 const progressText = document.getElementById('progress-text');
 const versionEl = document.getElementById('version');
+const localVersionEl = document.getElementById('local-version');
 const serverInput = document.getElementById('server');
 serverInput.value = localStorage.getItem('server') || '192.168.0.255';
 serverInput.addEventListener('change', () => localStorage.setItem('server', serverInput.value));
@@ -21,7 +22,23 @@ window.zona.onProgress((data) => {
 async function init() {
   const local = await window.zona.getLocalVersion();
   localVersionEl.textContent = 'local: ' + (local.version || 'none');
-  newsEl.textContent = 'Welcome to ZONA. Check for updates before playing.';
+  newsEl.textContent = 'Welcome to ZONA. Checking for updates...';
+  // auto-check updates
+  try {
+    const channel = channelSel.value;
+    const { manifest, needsUpdate } = await window.zona.checkUpdate(channel);
+    versionEl.textContent = 'v' + manifest.version;
+    if (needsUpdate) {
+      statusEl.textContent = 'Downloading update...';
+      await window.zona.downloadUpdate(manifest);
+      statusEl.textContent = 'Update complete. Ready to play.';
+    } else {
+      statusEl.textContent = 'Up to date. Ready to play.';
+    }
+  } catch (e) {
+    statusEl.textContent = 'Offline mode: ' + e.message;
+  }
+  newsEl.textContent = 'Welcome to ZONA. Press Play to start.';
 }
 
 playBtn.addEventListener('click', async () => {

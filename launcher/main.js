@@ -54,10 +54,16 @@ ipcMain.handle('download-update', async (e, manifest) => {
     const dest = path.join(gameDir, f.path);
     ensureDir(path.dirname(dest));
     // download
-    const res = await fetch(f.url || `file://${path.join(__dirname, f.path)}`);
-    // if url missing, skip (dev stub)
-    if (!f.url) continue;
-    const buf = Buffer.from(await res.arrayBuffer());
+    let buf;
+    if (f.url && f.url.startsWith('file://')) {
+      const filePath = decodeURIComponent(f.url.replace('file:///', '').replace('file://', ''));
+      buf = fs.readFileSync(filePath);
+    } else if (f.url) {
+      const res = await fetch(f.url);
+      buf = Buffer.from(await res.arrayBuffer());
+    } else {
+      continue;
+    }
     fs.writeFileSync(dest + '.tmp', buf);
     // sha256
     const hash = crypto.createHash('sha256').update(buf).digest('hex');
