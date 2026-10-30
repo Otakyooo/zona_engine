@@ -63,11 +63,11 @@ jobs:
             $files += @{ path = $_.Name; url = "$base/$($_.Name)"; sha256 = $hash; size = $_.Length }
           }
           @{ version = $tag; files = $files } | ConvertTo-Json -Depth 3 | Out-File launcher/manifest.json -Encoding utf8
-      - name: Download launcher artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: launcher-dist
-          path: launcher/dist
+      - name: Publish launcher
+        working-directory: launcher
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm ci && npm run build -- --publish always
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -75,7 +75,4 @@ jobs:
             target/release/zn-client.exe
             target/release/zn-server.exe
             target/release/zn-editor.exe
-            launcher/dist/*.exe
-            launcher/dist/*.yml
-            launcher/dist/*.blockmap
             launcher/manifest.json
