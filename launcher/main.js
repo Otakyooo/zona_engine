@@ -16,16 +16,18 @@ function writeVersion(v) { fs.writeFileSync(versionFile, JSON.stringify(v, null,
 function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
 
 async function fetchManifest(channel) {
-  const url = channel === 'dev'
-    ? 'http://127.0.0.1:8080/manifest.json'
-    : 'https://example.com/manifest.json';
-  // fallback local stub
+  const url = 'https://github.com/Otakyooo/zona_engine/releases/latest/download/manifest.json';
   const stubPath = path.join(__dirname, 'manifest.stub.json');
+  try {
+    const res = await fetch(url);
+    if (res.ok) return await res.json();
+  } catch (e) {
+    // fallback to local stub for dev
+  }
   if (fs.existsSync(stubPath)) {
     return JSON.parse(fs.readFileSync(stubPath, 'utf8'));
   }
-  const res = await fetch(url);
-  return await res.json();
+  return { version: '0.0.0', files: [] };
 }
 
 function sha256File(filePath) {

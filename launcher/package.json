@@ -7,6 +7,12 @@
     "start": "electron .",
     "build": "electron-builder"
   },
+  "build": {
+    "appId": "com.otakyooo.zona",
+    "win": {
+      "target": "portable"
+    }
+  },
   "dependencies": {
     "electron": "^33.0.0",
     "electron-updater": "^6.3.9",

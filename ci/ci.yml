@@ -34,12 +34,14 @@ jobs:
       - name: Create manifest
         shell: pwsh
         run: |
+          $tag = "${{ github.ref_name }}"
+          $base = "https://github.com/Otakyooo/zona_engine/releases/download/$tag"
           $files = @()
           Get-ChildItem target\release\*.exe | ForEach-Object {
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
-            $files += @{ path = $_.Name; url = ""; sha256 = $hash; size = $_.Length }
+            $files += @{ path = $_.Name; url = "$base/$($_.Name)"; sha256 = $hash; size = $_.Length }
           }
-          @{ version = "${{ github.ref_name }}"; files = $files } | ConvertTo-Json -Depth 3 | Out-File launcher\manifest.stub.json
+          @{ version = $tag; files = $files } | ConvertTo-Json -Depth 3 | Out-File launcher/manifest.json -Encoding utf8
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -48,4 +50,4 @@ jobs:
             target/release/zn-server.exe
             target/release/zn-editor.exe
             launcher/dist/*
-            launcher/manifest.stub.json
+            launcher/manifest.json
