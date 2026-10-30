@@ -76,4 +76,5 @@ jobs:
             target/release/zn-server.exe
             target/release/zn-editor.exe
             launcher/dist/*
+            launcher/dist/latest.yml
             launcher/manifest.json
