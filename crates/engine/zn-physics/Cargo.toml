@@ -1,0 +1,10 @@
+[package]
+name = "zn-physics"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rapier3d.workspace = true
+glam.workspace = true
+log.workspace = true
+thiserror.workspace = true

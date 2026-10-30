@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS inventory_items (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    item_id INTEGER NOT NULL,
+    quantity INTEGER NOT NULL DEFAULT 1,
+    slot INTEGER NOT NULL DEFAULT 0
+);

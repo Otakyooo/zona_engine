@@ -1,0 +1,12 @@
+[package]
+name = "zn-scene"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zn-core.workspace = true
+glam.workspace = true
+serde.workspace = true
+ron.workspace = true
+log.workspace = true
+thiserror.workspace = true

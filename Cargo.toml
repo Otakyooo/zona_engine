@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/engine/zn-core",
+    "crates/engine/zn-render",
+    "crates/engine/zn-physics",
+    "crates/engine/zn-audio",
+    "crates/engine/zn-assets",
+    "crates/engine/zn-input",
+    "crates/engine/zn-net",
+    "crates/engine/zn-scene",
+    "crates/game/zn-sim",
+    "crates/game/zn-content",
+    "crates/zn-client",
+    "crates/zn-server",
+    "crates/zn-tools",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["ZONA Team"]
+license = "MIT"
+repository = "https://github.com/zona/zona_engine"
+
+[workspace.dependencies]
+hecs = "0.10"
+winit = "0.30"
+wgpu = "24"
+rapier3d = "0.22"
+kira = "0.9"
+egui = "0.31"
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ron = "0.8"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "sqlite", "macros", "migrate"] }
+bincode = "1"
+glam = { version = "0.29", features = ["serde"] }
+log = "0.4"
+env_logger = "0.11"
+thiserror = "1"
+anyhow = "1"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+gltf = "1"
+image = "0.25"
+egui-winit = "0.31"
+eframe = { version = "0.31", features = ["wgpu"] }
+clap = { version = "4", features = ["derive"] }
+gilrs = "0.11"
+argon2 = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# internal crates
+zn-core = { path = "crates/engine/zn-core" }
+zn-render = { path = "crates/engine/zn-render" }
+zn-physics = { path = "crates/engine/zn-physics" }
+zn-audio = { path = "crates/engine/zn-audio" }
+zn-assets = { path = "crates/engine/zn-assets" }
+zn-input = { path = "crates/engine/zn-input" }
+zn-net = { path = "crates/engine/zn-net" }
+zn-scene = { path = "crates/engine/zn-scene" }
+zn-sim = { path = "crates/game/zn-sim" }
+zn-content = { path = "crates/game/zn-content" }
+zn-tools = { path = "crates/zn-tools" }

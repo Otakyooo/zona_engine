@@ -1,0 +1,11 @@
+[package]
+name = "zn-assets"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+gltf.workspace = true
+image.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true

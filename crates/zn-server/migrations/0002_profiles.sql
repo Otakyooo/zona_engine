@@ -1,0 +1,7 @@
+CREATE TABLE IF NOT EXISTS profiles (
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    level INTEGER NOT NULL DEFAULT 1,
+    xp INTEGER NOT NULL DEFAULT 0,
+    currency INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id)
+);

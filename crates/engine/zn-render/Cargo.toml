@@ -1,0 +1,14 @@
+[package]
+name = "zn-render"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+winit.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+log.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+zn-scene.workspace = true

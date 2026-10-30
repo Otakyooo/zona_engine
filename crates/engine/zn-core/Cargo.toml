@@ -1,0 +1,10 @@
+[package]
+name = "zn-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+hecs.workspace = true
+serde.workspace = true
+log.workspace = true
+thiserror.workspace = true

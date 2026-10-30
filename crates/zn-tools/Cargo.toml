@@ -1,0 +1,23 @@
+[package]
+name = "zn-tools"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "zn-editor"
+path = "src/bin/editor.rs"
+
+[dependencies]
+zn-core.workspace = true
+zn-scene.workspace = true
+zn-assets.workspace = true
+egui.workspace = true
+eframe.workspace = true
+glam.workspace = true
+log.workspace = true
+env_logger.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+ron.workspace = true
+serde.workspace = true
+clap.workspace = true

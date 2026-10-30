@@ -1,0 +1,1 @@
+cargo run -p zn-tools --bin zn-editor

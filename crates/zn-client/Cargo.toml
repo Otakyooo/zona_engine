@@ -1,0 +1,26 @@
+[package]
+name = "zn-client"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "zn-client"
+path = "src/main.rs"
+
+[dependencies]
+zn-core.workspace = true
+zn-render.workspace = true
+zn-input.workspace = true
+zn-scene.workspace = true
+zn-assets.workspace = true
+clap.workspace = true
+zn-net.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
+zn-sim.workspace = true
+glam.workspace = true
+pollster.workspace = true
+bincode.workspace = true

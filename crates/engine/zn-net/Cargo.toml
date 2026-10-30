@@ -1,0 +1,13 @@
+[package]
+name = "zn-net"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+bincode.workspace = true
+tokio.workspace = true
+log.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+zn-sim.workspace = true

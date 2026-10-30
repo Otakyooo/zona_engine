@@ -1,0 +1,12 @@
+[package]
+name = "zn-content"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zn-sim.workspace = true
+serde.workspace = true
+ron.workspace = true
+log.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true

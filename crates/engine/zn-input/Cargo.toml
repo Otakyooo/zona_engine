@@ -1,0 +1,11 @@
+[package]
+name = "zn-input"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+winit.workspace = true
+gilrs.workspace = true
+glam.workspace = true
+log.workspace = true
+thiserror.workspace = true

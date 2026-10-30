@@ -1,0 +1,23 @@
+[package]
+name = "zn-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "zn-server"
+path = "src/main.rs"
+
+[dependencies]
+zn-core.workspace = true
+zn-sim.workspace = true
+zn-net.workspace = true
+tokio.workspace = true
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
+argon2.workspace = true
+uuid.workspace = true
+sqlx.workspace = true
+password-hash = { version = "0.5", features = ["getrandom"] }
+bincode.workspace = true
+serde_json.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "zn-audio"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kira.workspace = true
+log.workspace = true
+thiserror.workspace = true

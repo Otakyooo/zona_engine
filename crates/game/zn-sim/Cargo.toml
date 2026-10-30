@@ -1,0 +1,15 @@
+[package]
+name = "zn-sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+zn-core.workspace = true
+zn-scene.workspace = true
+zn-physics.workspace = true
+serde.workspace = true
+glam.workspace = true
+log.workspace = true
+thiserror.workspace = true
+mlua.workspace = true
+ron.workspace = true
