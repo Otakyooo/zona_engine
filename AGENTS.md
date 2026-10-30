@@ -50,4 +50,4 @@ migrations/ (in zn-server)
 
 - `ELECTRON_RUN_AS_NODE` must be unset to run the Electron launcher.
 - Vulkan SDK recommended for Vulkan-primary development; wgpu falls back to DX12 without it.
-- Database defaults to SQLite (`zona.db`); migrations run automatically on server start.
+- Repository: https://github.com/Otakyooo/zona_engine
