@@ -40,6 +40,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     needs: [build-rust, build-launcher]
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
