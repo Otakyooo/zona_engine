@@ -52,7 +52,9 @@ struct Uniforms {
     light_dir: [f32; 3],
     _pad0: f32,
     ambient: f32,
+    _pad_before: [f32; 3],
     _pad1: [f32; 3],
+    _pad2: f32,
 }
 
 pub struct Renderer {
@@ -337,7 +339,9 @@ impl Renderer {
             light_dir: [ld.x, ld.y, ld.z],
             _pad0: 0.0,
             ambient: 0.3,
+            _pad_before: [0.0; 3],
             _pad1: [0.0; 3],
+            _pad2: 0.0,
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
