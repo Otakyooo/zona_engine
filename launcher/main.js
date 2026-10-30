@@ -1,3 +1,7 @@
+if (process.env.ELECTRON_RUN_AS_NODE) {
+  console.error('ELECTRON_RUN_AS_NODE is set. Please unset it before running ZONA Launcher.');
+  process.exit(1);
+}
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -7,7 +11,10 @@ const { autoUpdater } = require('electron-updater');
 
 const userData = app.getPath('userData');
 const settingsFile = path.join(userData, 'settings.json');
-const defaultGameDir = path.join(userData, 'game');
+const logFile = path.join(userData, 'launcher.log');
+function log(msg) {
+  try { fs.appendFileSync(logFile, new Date().toISOString() + ' ' + msg + '\n'); } catch {}
+}
 
 function readSettings() {
   try { return JSON.parse(fs.readFileSync(settingsFile, 'utf8')); } catch { return {}; }
@@ -50,13 +57,14 @@ async function fetchManifest(channel) {
   try {
     const res = await fetch(url);
     if (res.ok) return await res.json();
+    throw new Error('HTTP ' + res.status);
   } catch (e) {
-    // fallback to local stub for dev
+    log('fetchManifest error: ' + e.message);
+    if (fs.existsSync(stubPath)) {
+      try { return JSON.parse(fs.readFileSync(stubPath, 'utf8')); } catch {}
+    }
+    return { version: '0.0.0', files: [], error: e.message };
   }
-  if (fs.existsSync(stubPath)) {
-    return JSON.parse(fs.readFileSync(stubPath, 'utf8'));
-  }
-  return { version: '0.0.0', files: [] };
 }
 
 function sha256File(filePath) {
@@ -72,7 +80,16 @@ function sha256File(filePath) {
 ipcMain.handle('check-update', async (_e, channel) => {
   const manifest = await fetchManifest(channel);
   const local = readVersion();
-  return { manifest, local, needsUpdate: manifest.version !== local.version };
+  const exe = path.join(getGameDir(), 'zn-client.exe');
+  const exeMissing = !fs.existsSync(exe);
+  let needsUpdate = manifest.version !== local.version;
+  if (manifest.files && manifest.files.length === 0) {
+    needsUpdate = exeMissing;
+  }
+  if (manifest.error) {
+    return { manifest, local, needsUpdate, error: manifest.error };
+  }
+  return { manifest, local, needsUpdate };
 });
 
 ipcMain.handle('download-update', async (e, manifest) => {
@@ -118,6 +135,10 @@ ipcMain.handle('download-update', async (e, manifest) => {
 
 ipcMain.handle('launch-game', async (_e, opts) => {
   const exe = path.join(getGameDir(), 'zn-client.exe');
+  if (!fs.existsSync(exe)) {
+    log('launch-game: exe missing ' + exe);
+    return { ok: false, error: 'Game not installed. Click Update first.' };
+  }
   const args = [];
   if (opts && opts.server) { args.push('--server', opts.server); }
   if (opts && opts.port) { args.push('--port', String(opts.port)); }
@@ -131,7 +152,8 @@ ipcMain.handle('launch-game', async (_e, opts) => {
 ipcMain.handle('get-local-version', () => readVersion());
 ipcMain.handle('get-install-dir', async () => getGameDir());
 ipcMain.handle('pick-install-dir', async () => {
-  const res = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  const win = BrowserWindow.getFocusedWindow();
+  const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'] });
   if (res.canceled || !res.filePaths.length) return null;
   return res.filePaths[0];
 });

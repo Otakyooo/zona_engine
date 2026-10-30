@@ -1,6 +1,7 @@
 const channelSel = document.getElementById('channel');
 const statusEl = document.getElementById('status');
 const newsEl = document.getElementById('news');
+const updateBtn = document.getElementById('update');
 const playBtn = document.getElementById('play');
 const progressBar = document.getElementById('progress-bar');
 const progressText = document.getElementById('progress-text');
@@ -47,8 +48,9 @@ async function init() {
   // auto-check updates
   try {
     const channel = channelSel.value;
-    const { manifest, needsUpdate } = await window.zona.checkUpdate(channel);
-    versionEl.textContent = 'v' + manifest.version;
+    const { manifest, needsUpdate, error } = await window.zona.checkUpdate(channel);
+    if (error) statusEl.textContent = 'Manifest: ' + error;
+    versionEl.textContent = 'v' + (manifest.version || '?');
     if (needsUpdate) {
       statusEl.textContent = 'Downloading update...';
       await window.zona.downloadUpdate(manifest);
@@ -62,24 +64,32 @@ async function init() {
   newsEl.textContent = 'Welcome to ZONA. Press Play to start.';
 }
 
-playBtn.addEventListener('click', async () => {
+updateBtn.addEventListener('click', async () => {
   const channel = channelSel.value;
   statusEl.textContent = 'Checking updates...';
   try {
-    const { manifest, needsUpdate } = await window.zona.checkUpdate(channel);
-    versionEl.textContent = 'v' + manifest.version;
+    const { manifest, needsUpdate, error } = await window.zona.checkUpdate(channel);
+    if (error) statusEl.textContent = 'Manifest error: ' + error;
+    versionEl.textContent = 'v' + (manifest.version || '?');
     if (needsUpdate) {
       statusEl.textContent = 'Downloading update...';
       await window.zona.downloadUpdate(manifest);
-      statusEl.textContent = 'Update complete.';
+      statusEl.textContent = 'Update complete. Ready to play.';
     } else {
-      statusEl.textContent = 'Up to date.';
+      statusEl.textContent = 'Up to date. Ready to play.';
     }
-    statusEl.textContent = 'Launching game...';
-    await window.zona.launchGame({ server: document.getElementById('server').value, port: 7777 });
-    statusEl.textContent = 'Game launched.';
   } catch (e) {
     statusEl.textContent = 'Error: ' + e.message;
+  }
+});
+
+playBtn.addEventListener('click', async () => {
+  statusEl.textContent = 'Launching game...';
+  const res = await window.zona.launchGame({ server: document.getElementById('server').value, port: 7777 });
+  if (res && res.ok) {
+    statusEl.textContent = 'Game launched.';
+  } else {
+    statusEl.textContent = 'Launch failed: ' + (res && res.error ? res.error : 'unknown');
   }
 });
 
