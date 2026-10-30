@@ -35,7 +35,9 @@ jobs:
         run: npm ci
       - name: Build
         working-directory: launcher
-        run: npm run build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm ci && npm run build -- --publish never
       - name: Upload launcher
         uses: actions/upload-artifact@v4
         with:
