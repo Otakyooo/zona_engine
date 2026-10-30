@@ -9,8 +9,14 @@
   },
   "build": {
     "appId": "com.otakyooo.zona",
+    "publish": {
+      "provider": "github",
+      "owner": "Otakyooo",
+      "repo": "zona_engine"
+    },
     "win": {
-      "target": "portable"
+      "target": "nsis",
+      "signAndEditExecutable": false
     }
   },
   "author": "Otakyooo",

@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { autoUpdater } = require('electron-updater');
 
 const userData = app.getPath('userData');
 const settingsFile = path.join(userData, 'settings.json');
@@ -151,6 +152,20 @@ function createWindow() {
 
 app.whenReady().then(() => {
   createWindow();
+  // self-update
+  try {
+    autoUpdater.autoDownload = true;
+    autoUpdater.allowPrerelease = true;
+    autoUpdater.verifyUpdateCodeSignature = false;
+    if (!app.isPackaged) autoUpdater.forceDevUpdateConfig = true;
+    autoUpdater.checkForUpdatesAndNotify();
+  } catch (e) {
+    console.error('autoUpdater error', e);
+  }
+  autoUpdater.on('update-downloaded', () => {
+    autoUpdater.quitAndInstall();
+  });
+  autoUpdater.on('error', (e) => console.error('autoUpdater', e));
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
