@@ -44,7 +44,7 @@ migrations/ (in zn-server)
 - M1.5: polish (lighting, textures, gamepad, tests) — done
 - M5: accounts + DB (SQLite) — done
 - M6: launcher + delivery — done
-- M4: Zona gameplay (anomalies, artifacts, loot, extraction, progression) — planned
+- M7: release hygiene (crash reporting, installer, CI release) — done
 
 ## Notes
 

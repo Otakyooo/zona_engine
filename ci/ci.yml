@@ -22,16 +22,30 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-  build-launcher:
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
+    needs: [build-rust, build-launcher]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --workspace --release
+      - name: Create manifest
+        shell: pwsh
+        run: |
+          $files = @()
+          Get-ChildItem target\release\*.exe | ForEach-Object {
+            $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+            $files += @{ path = $_.Name; url = ""; sha256 = $hash; size = $_.Length }
+          }
+          @{ version = "${{ github.ref_name }}"; files = $files } | ConvertTo-Json -Depth 3 | Out-File launcher\manifest.stub.json
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          node-version: 20
-      - name: Install
-        working-directory: launcher
-        run: npm ci
-      - name: Build
-        working-directory: launcher
-        run: npm run build
+          files: |
+            target/release/zn-client.exe
+            target/release/zn-server.exe
+            target/release/zn-editor.exe
+            launcher/dist/*
+            launcher/manifest.stub.json

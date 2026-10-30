@@ -24,6 +24,8 @@ struct Cli {
     username: Option<String>,
     #[arg(long)]
     password: Option<String>,
+    #[arg(long)]
+    telemetry: bool,
 }
 
 struct App {
@@ -392,8 +394,24 @@ fn make_cube(center: Vec3, half: f32, color: [f32; 3]) -> (Vec<Vertex>, Vec<u32>
 }
 
 fn main() {
+    // crash reporting: write panic to crash.log
+    std::panic::set_hook(Box::new(|info| {
+        let log_path = std::env::var("APPDATA")
+            .map(|p| std::path::PathBuf::from(p).join("ZONA").join("crash.log"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("crash.log"));
+        if let Some(parent) = log_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let msg = format!("ZONA crash: {}\n", info);
+        let _ = std::fs::write(&log_path, &msg);
+        eprintln!("{}", msg);
+    }));
+
     env_logger::init();
     let cli = Cli::parse();
+    if cli.telemetry {
+        log::info!("telemetry: session_start");
+    }
 
     let (out_tx, out_rx) = mpsc::channel::<ClientPacket>();
     let (in_tx, in_rx) = mpsc::channel::<ServerPacket>();
