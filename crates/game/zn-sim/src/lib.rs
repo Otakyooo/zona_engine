@@ -156,6 +156,13 @@ impl SimWorld {
         }
         self.tick += 1;
     }
+    pub fn players_in_radius(&self, pos: Vec3, radius: f32) -> Vec<&Player> {
+        let r2 = radius * radius;
+        self.players
+            .iter()
+            .filter(|p| (p.position - pos).length_squared() <= r2)
+            .collect()
+    }
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             tick: self.tick,

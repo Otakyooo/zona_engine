@@ -422,6 +422,9 @@ fn main() {
     let password = cli.password.clone().unwrap_or_else(|| "guest".into());
     thread::spawn(move || {
         use std::io::{Read, Write};
+        use std::net::UdpSocket;
+
+        // TCP auth
         let mut stream = match std::net::TcpStream::connect("127.0.0.1:7777") {
             Ok(s) => s,
             Err(e) => {
@@ -431,59 +434,70 @@ fn main() {
         };
         stream.set_read_timeout(Some(Duration::from_millis(5))).ok();
 
-        // auth flow
-        if let Some(tok) = token {
-            let pkt = ClientPacket::Connect { token: tok };
-            if let Ok(data) = encode(&pkt) {
-                let _ = stream.write_all(&data);
-            }
-        } else {
+        let mut got_token = token;
+        if got_token.is_none() {
             let pkt = ClientPacket::Login { username, password };
             if let Ok(data) = encode(&pkt) {
                 let _ = stream.write_all(&data);
             }
-            // wait for LoginResult
-            let mut got_token = None;
             for _ in 0..200 {
                 let mut len_buf = [0u8; 4];
                 if stream.read_exact(&mut len_buf).is_ok() {
                     let len = u32::from_le_bytes(len_buf) as usize;
                     let mut buf = vec![0u8; len];
-                    if stream.read_exact(&mut buf).is_ok()
-                        && let Ok(ServerPacket::LoginResult { ok, token, .. }) =
-                            bincode::deserialize::<ServerPacket>(&buf)
-                    {
-                        if ok {
-                            got_token = token;
-                        }
-                        break;
-                    }
+            if stream.read_exact(&mut buf).is_ok()
+                && let Ok(ServerPacket::LoginResult { ok, token, .. }) =
+                    bincode::deserialize::<ServerPacket>(&buf)
+            {
+                if ok {
+                    got_token = token;
+                }
+                break;
+            }
                 }
                 thread::sleep(Duration::from_millis(10));
             }
-            if let Some(tok) = got_token {
-                let pkt = ClientPacket::Connect { token: tok };
-                if let Ok(data) = encode(&pkt) {
-                    let _ = stream.write_all(&data);
-                }
+        }
+
+        let token = match got_token {
+            Some(t) => t,
+            None => {
+                log::error!("auth failed");
+                return;
             }
+        };
+
+        // UDP setup
+        let udp = match UdpSocket::bind("0.0.0.0:0") {
+            Ok(u) => u,
+            Err(e) => {
+                log::error!("udp bind failed: {}", e);
+                return;
+            }
+        };
+        udp.set_read_timeout(Some(Duration::from_millis(5))).ok();
+        let server_addr: std::net::SocketAddr = "127.0.0.1:7778".parse().unwrap();
+
+        // register endpoint
+        let reg = ClientPacket::Connect {
+            token: token.clone(),
+        };
+        if let Ok(data) = encode(&reg) {
+            let _ = udp.send_to(&data, server_addr);
         }
 
         loop {
             // outbound
             while let Ok(pkt) = out_rx.try_recv() {
                 if let Ok(data) = encode(&pkt) {
-                    let _ = stream.write_all(&data);
+                    let _ = udp.send_to(&data, server_addr);
                 }
             }
             // inbound
-            let mut len_buf = [0u8; 4];
-            if stream.read_exact(&mut len_buf).is_ok() {
-                let len = u32::from_le_bytes(len_buf) as usize;
-                let mut buf = vec![0u8; len];
-                if stream.read_exact(&mut buf).is_ok()
-                    && let Ok(pkt) = bincode::deserialize::<ServerPacket>(&buf)
-                {
+            let mut buf = vec![0u8; 65535];
+            if let Ok((n, _addr)) = udp.recv_from(&mut buf) {
+                buf.truncate(n);
+                if let Ok(pkt) = bincode::deserialize::<ServerPacket>(&buf) {
                     let _ = in_tx.send(pkt);
                 }
             }

@@ -1,6 +1,8 @@
 //! zn-net: netcode (snapshot/delta, prediction, lag-compensation).
 
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
+use std::net::SocketAddr;
 use zn_sim::{InputCommand, Inventory, PlayerProfile, Snapshot};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,8 +59,84 @@ pub fn decode_client(bytes: &[u8]) -> Result<ClientPacket, Box<dyn std::error::E
     Ok(bincode::deserialize(bytes)?)
 }
 
-pub fn decode_server(bytes: &[u8]) -> Result<ServerPacket, Box<dyn std::error::Error>> {
-    Ok(bincode::deserialize(bytes)?)
+pub struct UdpEndpoint {
+    pub socket: tokio::net::UdpSocket,
+}
+
+impl UdpEndpoint {
+    pub async fn bind(addr: &str) -> anyhow::Result<Self> {
+        let socket = tokio::net::UdpSocket::bind(addr)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(Self { socket })
+    }
+    pub async fn send_to(&self, data: &[u8], to: SocketAddr) -> anyhow::Result<()> {
+        self.socket
+            .send_to(data, to)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
+    }
+    pub async fn recv_from(&self) -> anyhow::Result<(Vec<u8>, SocketAddr)> {
+        let mut buf = vec![0u8; 65535];
+        let (n, addr) = self
+            .socket
+            .recv_from(&mut buf)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+        buf.truncate(n);
+        Ok((buf, addr))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ReliableChannel {
+    pub next_seq: u32,
+    pub acked: std::collections::HashSet<u32>,
+    pub pending: VecDeque<(u32, Vec<u8>, std::time::Instant)>,
+    pub timeout: std::time::Duration,
+}
+
+impl Default for ReliableChannel {
+    fn default() -> Self {
+        Self {
+            next_seq: 0,
+            acked: std::collections::HashSet::new(),
+            pending: VecDeque::new(),
+            timeout: std::time::Duration::from_millis(100),
+        }
+    }
+}
+
+impl ReliableChannel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn send_reliable(&mut self, data: Vec<u8>) -> u32 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.pending
+            .push_back((seq, data, std::time::Instant::now()));
+        seq
+    }
+    pub fn ack(&mut self, seq: u32) {
+        self.acked.insert(seq);
+        self.pending.retain(|(s, _, _)| *s != seq);
+    }
+    pub fn resend_due(&mut self) -> Vec<(u32, Vec<u8>)> {
+        let now = std::time::Instant::now();
+        let mut out = Vec::new();
+        for (seq, data, sent) in self.pending.iter_mut() {
+            if now.duration_since(*sent) >= self.timeout {
+                out.push((*seq, data.clone()));
+                *sent = now;
+            }
+        }
+        out
+    }
+    pub fn is_acked(&self, seq: u32) -> bool {
+        self.acked.contains(&seq)
+    }
 }
 
 pub async fn send_packet<W, T>(stream: &mut W, packet: &T) -> Result<(), Box<dyn std::error::Error>>
