@@ -23,8 +23,19 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-  release:
-    if: startsWith(github.ref, 'refs/tags/v')
+  build-launcher:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install
+        working-directory: launcher
+        run: npm ci
+      - name: Build
+        working-directory: launcher
+        run: npm run build
     runs-on: windows-latest
     needs: [build-rust, build-launcher]
     steps:
