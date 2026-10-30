@@ -36,6 +36,11 @@ jobs:
       - name: Build
         working-directory: launcher
         run: npm run build
+      - name: Upload launcher
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-dist
+          path: launcher/dist/*
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
@@ -58,6 +63,11 @@ jobs:
             $files += @{ path = $_.Name; url = "$base/$($_.Name)"; sha256 = $hash; size = $_.Length }
           }
           @{ version = $tag; files = $files } | ConvertTo-Json -Depth 3 | Out-File launcher/manifest.json -Encoding utf8
+      - name: Download launcher artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: launcher-dist
+          path: launcher/dist
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
