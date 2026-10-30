@@ -5,7 +5,9 @@ const playBtn = document.getElementById('play');
 const progressBar = document.getElementById('progress-bar');
 const progressText = document.getElementById('progress-text');
 const versionEl = document.getElementById('version');
-const localVersionEl = document.getElementById('local-version');
+const serverInput = document.getElementById('server');
+serverInput.value = localStorage.getItem('server') || '192.168.0.255';
+serverInput.addEventListener('change', () => localStorage.setItem('server', serverInput.value));
 
 channelSel.value = localStorage.getItem('channel') || 'stable';
 channelSel.addEventListener('change', () => localStorage.setItem('channel', channelSel.value));
@@ -36,7 +38,7 @@ playBtn.addEventListener('click', async () => {
       statusEl.textContent = 'Up to date.';
     }
     statusEl.textContent = 'Launching game...';
-    await window.zona.launchGame({});
+    await window.zona.launchGame({ server: document.getElementById('server').value, port: 7777 });
     statusEl.textContent = 'Game launched.';
   } catch (e) {
     statusEl.textContent = 'Error: ' + e.message;

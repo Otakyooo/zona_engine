@@ -5,6 +5,15 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+struct Cli {
+    #[arg(long, default_value = "0.0.0.0")]
+    bind: String,
+    #[arg(long, default_value_t = 7777)]
+    port: u16,
+}
 use glam::Vec3;
 use tokio::net::{TcpListener, tcp::OwnedWriteHalf};
 use tokio::sync::Mutex;
@@ -15,12 +24,13 @@ use zn_sim::{Inventory, InventoryItem, Player, PlayerProfile, SimWorld};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
+    let cli = Cli::parse();
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:zona.db?mode=rwc".into());
     let pool = SqlitePool::connect(&db_url).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
 
-    let listener = TcpListener::bind("0.0.0.0:7777").await?;
-    let udp = UdpEndpoint::bind("0.0.0.0:7778").await?;
+    let listener = TcpListener::bind(format!("{}:{}", cli.bind, cli.port)).await?;
+    let udp = UdpEndpoint::bind(&format!("{}:{}", cli.bind, cli.port + 1)).await?;
     let udp = Arc::new(udp);
     log::info!("zn-server listening TCP 7777, UDP 7778");
 

@@ -82,6 +82,8 @@ ipcMain.handle('download-update', async (e, manifest) => {
 ipcMain.handle('launch-game', async (_e, opts) => {
   const exe = path.join(gameDir, 'zn-client.exe');
   const args = [];
+  if (opts && opts.server) { args.push('--server', opts.server); }
+  if (opts && opts.port) { args.push('--port', String(opts.port)); }
   if (opts && opts.token) args.push('--token', opts.token);
   if (opts && opts.scene) args.push('--scene', opts.scene);
   const child = spawn(exe, args, { detached: true, stdio: 'ignore' });

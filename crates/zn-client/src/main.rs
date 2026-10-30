@@ -26,6 +26,10 @@ struct Cli {
     password: Option<String>,
     #[arg(long)]
     telemetry: bool,
+    #[arg(long, default_value = "127.0.0.1")]
+    server: String,
+    #[arg(long, default_value_t = 7777)]
+    port: u16,
 }
 
 struct App {
@@ -438,12 +442,14 @@ fn main() {
     let token = cli.token.clone();
     let username = cli.username.clone().unwrap_or_else(|| "guest".into());
     let password = cli.password.clone().unwrap_or_else(|| "guest".into());
+    let server = cli.server.clone();
+    let port = cli.port;
     thread::spawn(move || {
         use std::io::{Read, Write};
         use std::net::UdpSocket;
 
         // TCP auth
-        let mut stream = match std::net::TcpStream::connect("127.0.0.1:7777") {
+        let mut stream = match std::net::TcpStream::connect(format!("{}:{}", server, port)) {
             Ok(s) => s,
             Err(e) => {
                 log::error!("connect failed: {}", e);
@@ -494,7 +500,7 @@ fn main() {
             }
         };
         udp.set_read_timeout(Some(Duration::from_millis(5))).ok();
-        let server_addr: std::net::SocketAddr = "127.0.0.1:7778".parse().unwrap();
+        let server_addr: std::net::SocketAddr = format!("{}:{}", server, port + 1).parse().unwrap();
 
         // register endpoint
         let reg = ClientPacket::Connect {
