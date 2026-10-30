@@ -1,11 +1,11 @@
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use clap::Parser;
 use password_hash::{SaltString, rand_core::OsRng};
 use sqlx::sqlite::SqlitePool;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use clap::Parser;
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -52,7 +52,12 @@ async fn main() -> anyhow::Result<()> {
     world.loot.push(zn_sim::LootItem {
         id: 1,
         position: Vec3::new(2.0, 0.5, 2.0),
-        item: zn_sim::Item { id: 1, name: "Medkit".into(), value: 50, consumable: true },
+        item: zn_sim::Item {
+            id: 1,
+            name: "Medkit".into(),
+            value: 50,
+            consumable: true,
+        },
     });
     world.creatures.push(zn_sim::Creature {
         id: 1,

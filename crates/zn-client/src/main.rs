@@ -322,21 +322,31 @@ impl ApplicationHandler for App {
                         );
                     }
                     for c in &snap.creatures {
-                        let cube = make_cube(c.position + Vec3::new(0.0, 0.5, 0.0), 0.5, [0.8, 0.2, 0.2]);
+                        let cube =
+                            make_cube(c.position + Vec3::new(0.0, 0.5, 0.0), 0.5, [0.8, 0.2, 0.2]);
                         remote_meshes.push(
-                            self.renderer.as_ref().unwrap().create_mesh(&cube.0, &cube.1),
+                            self.renderer
+                                .as_ref()
+                                .unwrap()
+                                .create_mesh(&cube.0, &cube.1),
                         );
                     }
                     for l in &snap.loot {
                         let cube = make_cube(l.position, 0.3, [1.0, 1.0, 0.2]);
                         remote_meshes.push(
-                            self.renderer.as_ref().unwrap().create_mesh(&cube.0, &cube.1),
+                            self.renderer
+                                .as_ref()
+                                .unwrap()
+                                .create_mesh(&cube.0, &cube.1),
                         );
                     }
                     for a in &snap.anomalies {
                         let cube = make_cube(a.position, a.radius, [0.2, 0.2, 0.8]);
                         remote_meshes.push(
-                            self.renderer.as_ref().unwrap().create_mesh(&cube.0, &cube.1),
+                            self.renderer
+                                .as_ref()
+                                .unwrap()
+                                .create_mesh(&cube.0, &cube.1),
                         );
                     }
                 }
@@ -469,15 +479,15 @@ fn main() {
                 if stream.read_exact(&mut len_buf).is_ok() {
                     let len = u32::from_le_bytes(len_buf) as usize;
                     let mut buf = vec![0u8; len];
-            if stream.read_exact(&mut buf).is_ok()
-                && let Ok(ServerPacket::LoginResult { ok, token, .. }) =
-                    bincode::deserialize::<ServerPacket>(&buf)
-            {
-                if ok {
-                    got_token = token;
-                }
-                break;
-            }
+                    if stream.read_exact(&mut buf).is_ok()
+                        && let Ok(ServerPacket::LoginResult { ok, token, .. }) =
+                            bincode::deserialize::<ServerPacket>(&buf)
+                    {
+                        if ok {
+                            got_token = token;
+                        }
+                        break;
+                    }
                 }
                 thread::sleep(Duration::from_millis(10));
             }

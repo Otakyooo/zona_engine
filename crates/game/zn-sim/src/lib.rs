@@ -199,9 +199,20 @@ pub struct Inventory {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum GameEvent {
-    PlayerDeath { player_id: u64, dropped_loot: Vec<Item>, dropped_consumables: Vec<Item> },
-    ExtractionSuccess { player_id: u64, loot: Vec<Item> },
-    CreatureKilled { creature_id: u64, killer: u64, xp: i64 },
+    PlayerDeath {
+        player_id: u64,
+        dropped_loot: Vec<Item>,
+        dropped_consumables: Vec<Item>,
+    },
+    ExtractionSuccess {
+        player_id: u64,
+        loot: Vec<Item>,
+    },
+    CreatureKilled {
+        creature_id: u64,
+        killer: u64,
+        xp: i64,
+    },
 }
 
 #[derive(Default)]
@@ -317,7 +328,10 @@ impl SimWorld {
         }
         for pid in &completed {
             // collect loot? For now empty; client/server handle
-            self.events.push(GameEvent::ExtractionSuccess { player_id: *pid, loot: Vec::new() });
+            self.events.push(GameEvent::ExtractionSuccess {
+                player_id: *pid,
+                loot: Vec::new(),
+            });
             if let Some(p) = self.get_player_mut(*pid) {
                 p.add_xp(100);
             }
