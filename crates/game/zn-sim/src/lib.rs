@@ -41,6 +41,24 @@ pub mod ids {
     }
 }
 
+/// Допустимое расхождение углов, при котором коррекция не применяется (~20°).
+const ANGLE_THRESHOLD: f32 = 0.35;
+/// Доля, на которую серверное значение подмешивается к локальному.
+const ANGLE_BLEND: f32 = 0.15;
+
+/// Мягкая коррекция углов обзора.
+///
+/// Возвращает `None`, если расхождение в пределах нормы: снапшот приходит
+/// 20 раз в секунду, и жёсткая перезапись yaw/pitch делала мышь неотзывчивой.
+pub fn correct_angles(local: (f32, f32), server: (f32, f32)) -> Option<(f32, f32)> {
+    let dyaw = server.0 - local.0;
+    let dpitch = server.1 - local.1;
+    if dyaw.abs() <= ANGLE_THRESHOLD && dpitch.abs() <= ANGLE_THRESHOLD {
+        return None;
+    }
+    Some((local.0 + dyaw * ANGLE_BLEND, local.1 + dpitch * ANGLE_BLEND))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InputCommand {
     pub seq: u32,
@@ -640,6 +658,13 @@ mod tests {
         assert!(inv.remove_item(1, 1));
         assert!(inv.has_item(1, 1));
         assert!(!inv.remove_item(1, 5));
+    }
+
+    #[test]
+    fn angle_correction_ignores_small_delta() {
+        assert!(correct_angles((1.0, 0.0), (1.1, 0.1)).is_none());
+        let (yaw, _) = correct_angles((1.0, 0.0), (2.0, 0.0)).unwrap();
+        assert!(yaw > 1.0 && yaw < 2.0, "коррекция должна быть частичной");
     }
 
     #[test]

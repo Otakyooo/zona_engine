@@ -337,8 +337,15 @@ impl ApplicationHandler for App {
                                 } else if dist > 0.5 {
                                     self.local_pos = self.local_pos.lerp(server_pos, 0.25);
                                 }
-                                self.yaw = ps.yaw;
-                                self.pitch = ps.pitch;
+                                // Углы не перезаписываем: снапшот приходит 20 раз
+                                // в секунду и перебивал бы локальную мышь.
+                                if let Some((yaw, pitch)) = zn_sim::correct_angles(
+                                    (self.yaw, self.pitch),
+                                    (ps.yaw, ps.pitch),
+                                ) {
+                                    self.yaw = yaw;
+                                    self.pitch = pitch;
+                                }
                             }
                             self.latest_snapshot = Some(snap);
                         }
@@ -589,13 +596,22 @@ fn main() {
     let username = cli
         .username
         .clone()
-        .or_else(|| std::env::var("ZONA_USERNAME").ok())
-        .unwrap_or_else(|| "guest".into());
+        .or_else(|| std::env::var("ZONA_USERNAME").ok());
     let password = cli
         .password
         .clone()
-        .or_else(|| std::env::var("ZONA_PASSWORD").ok())
-        .unwrap_or_else(|| "guest".into());
+        .or_else(|| std::env::var("ZONA_PASSWORD").ok());
+    if token.is_none() && (username.is_none() || password.is_none()) {
+        eprintln!(
+            "ZONA: нужны учётные данные.\n\
+             Укажите --token, либо --username и --password,\n\
+             либо переменные ZONA_USERNAME и ZONA_PASSWORD.\n\
+             Лаунчер передаёт токен сам."
+        );
+        std::process::exit(2);
+    }
+    let username = username.unwrap_or_default();
+    let password = password.unwrap_or_default();
     let register = cli.register;
     let server = cli.server.clone();
     let port = cli.port;
