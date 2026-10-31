@@ -418,30 +418,12 @@ async fn handle_events(
                 );
             }
             zn_sim::GameEvent::PlayerDeath { player_id, .. } => {
-                // drop inventory as loot
-                if let Some(p) = world.get_player(player_id) {
-                    let pos = p.position;
-                    let inv = p.inventory.clone();
-                    for (i, it) in inv.items.into_iter().enumerate() {
-                        world.loot.push(zn_sim::LootItem {
-                            id: 1000 + i as u64,
-                            position: pos,
-                            item: zn_sim::Item {
-                                id: it.item_id as u64,
-                                name: format!("item_{}", it.item_id),
-                                value: 10,
-                                consumable: true,
-                            },
-                        });
-                    }
-                }
-                if let Some(p) = world.get_player_mut(player_id) {
-                    p.health = p.max_health;
-                    p.position = Vec3::ZERO;
-                    p.radiation = 0.0;
-                    p.hunger = 100.0;
-                    p.thirst = 100.0;
-                    p.inventory = Inventory::default();
+                // Лут выложен и респаун выполнен в симуляции: здесь только запись в БД.
+                if let Some(uid) = player_to_user.get(&player_id)
+                    && let Some(p) = world.get_player(player_id)
+                {
+                    save_profile(pool, *uid, Some(p)).await;
+                    save_inventory(pool, *uid, &p.inventory).await;
                 }
             }
             _ => {}

@@ -4,6 +4,43 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Пространства идентификаторов, общие для клиента и сервера.
+///
+/// Раньше id предметов, лута и артефактов жили в одном числовом ряду: артефакт
+/// с id 1 в инвентаре съедался как аптечка. Разносим по диапазонам.
+pub mod ids {
+    /// Предметы инвентаря (1 — аптечка, 2 — бинт).
+    pub const ITEM_MAX: u64 = 999;
+    /// Выпавший лут: `LOOT_BASE + счётчик`.
+    pub const LOOT_BASE: u64 = 1_000_000;
+    /// Артефакты в инвентаре: `ARTIFACT_BASE + id артефакта`.
+    pub const ARTIFACT_BASE: u64 = 2_000_000;
+    /// Существа: `CREATURE_BASE + id`.
+    pub const CREATURE_BASE: u64 = 3_000_000;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum IdKind {
+        Item,
+        Loot,
+        Artifact,
+        Creature,
+    }
+
+    pub fn classify(id: u64) -> Option<IdKind> {
+        if (1..=ITEM_MAX).contains(&id) {
+            Some(IdKind::Item)
+        } else if (LOOT_BASE..LOOT_BASE + 1_000_000).contains(&id) {
+            Some(IdKind::Loot)
+        } else if (ARTIFACT_BASE..ARTIFACT_BASE + 1_000_000).contains(&id) {
+            Some(IdKind::Artifact)
+        } else if (CREATURE_BASE..CREATURE_BASE + 1_000_000).contains(&id) {
+            Some(IdKind::Creature)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InputCommand {
     pub seq: u32,
@@ -273,11 +310,22 @@ pub struct SimWorld {
     pub extraction_zones: Vec<ExtractionZone>,
     pub extraction_timers: HashMap<u64, f32>,
     pub events: Vec<GameEvent>,
+    /// Следующий свободный id для выпавшего лута.
+    pub next_loot_id: u64,
 }
 
 impl SimWorld {
     pub fn new() -> Self {
-        Self::default()
+        let mut world = Self::default();
+        world.seed_loot_ids();
+        world
+    }
+
+    /// Счётчик стартует выше всего, что уже лежит в мире, и не ниже `LOOT_BASE`,
+    /// чтобы выпавший лут не пересекался ни с предметами, ни с лутом карты.
+    pub fn seed_loot_ids(&mut self) {
+        let max_existing = self.loot.iter().map(|l| l.id).max().unwrap_or(0);
+        self.next_loot_id = max_existing.max(ids::LOOT_BASE) + 1;
     }
     pub fn add_player(&mut self, p: Player) {
         self.players.push(p);
@@ -290,6 +338,35 @@ impl SimWorld {
     }
     pub fn get_player_mut(&mut self, id: u64) -> Option<&mut Player> {
         self.players.iter_mut().find(|p| p.id == id)
+    }
+
+    /// Выкладывает инвентарь игрока на землю в точке смерти и очищает его.
+    ///
+    /// Вызывать строго до респауна: позиция берётся у ещё не перемещённого
+    /// игрока, иначе весь лут окажется в начале координат. Id выдаются из
+    /// `next_loot_id`, поэтому кучи разных смертей не конфликтуют.
+    pub fn drop_inventory_at(&mut self, player_id: u64, pos: Vec3) -> Vec<Item> {
+        let inventory = match self.get_player_mut(player_id) {
+            Some(p) => std::mem::take(&mut p.inventory),
+            None => return Vec::new(),
+        };
+        let mut dropped = Vec::new();
+        for it in inventory.items {
+            let item = Item {
+                id: it.item_id as u64,
+                name: format!("item_{}", it.item_id),
+                value: 10,
+                consumable: true,
+            };
+            self.loot.push(LootItem {
+                id: self.next_loot_id,
+                position: pos,
+                item: item.clone(),
+            });
+            self.next_loot_id += 1;
+            dropped.push(item);
+        }
+        dropped
     }
     pub fn apply_input(&mut self, player_id: u64, cmd: &InputCommand) {
         if let Some(p) = self.get_player_mut(player_id) {
@@ -387,13 +464,16 @@ impl SimWorld {
 
         // handle deaths
         for pid in &dead_players {
-            let dropped_loot = Vec::new();
-            let dropped_consumables = Vec::new();
-            // For MVP: drop all loot items near player? We'll just emit event
+            // Позиция читается до респауна — иначе лут падает в начало координат.
+            let death_pos = self
+                .get_player(*pid)
+                .map(|p| p.position)
+                .unwrap_or_default();
+            let dropped_loot = self.drop_inventory_at(*pid, death_pos);
             self.events.push(GameEvent::PlayerDeath {
                 player_id: *pid,
                 dropped_loot,
-                dropped_consumables,
+                dropped_consumables: Vec::new(),
             });
             if let Some(p) = self.get_player_mut(*pid) {
                 p.health = p.max_health;
@@ -545,5 +625,55 @@ mod tests {
         assert!(inv.remove_item(1, 1));
         assert!(inv.has_item(1, 1));
         assert!(!inv.remove_item(1, 5));
+    }
+
+    #[test]
+    fn death_loot_at_death_position() {
+        let mut w = SimWorld::new();
+        let mut p = Player::new(1, "p");
+        p.inventory.add_item(1, 2);
+        w.add_player(p);
+
+        let pos = Vec3::new(7.0, 0.5, -3.0);
+        let dropped = w.drop_inventory_at(1, pos);
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(w.loot.len(), 1);
+        assert_eq!(w.loot[0].position, pos);
+        assert!(w.get_player(1).unwrap().inventory.items.is_empty());
+    }
+
+    #[test]
+    fn death_loot_unique_across_deaths() {
+        let mut w = SimWorld::new();
+        w.add_player(Player::new(1, "a"));
+        w.add_player(Player::new(2, "b"));
+        w.get_player_mut(1).unwrap().inventory.add_item(1, 1);
+        w.get_player_mut(2).unwrap().inventory.add_item(2, 1);
+
+        w.drop_inventory_at(1, Vec3::new(1.0, 0.0, 0.0));
+        w.drop_inventory_at(2, Vec3::new(2.0, 0.0, 0.0));
+
+        assert_eq!(w.loot.len(), 2);
+        assert_ne!(w.loot[0].id, w.loot[1].id);
+        assert!(w.loot.iter().all(|l| l.id >= ids::LOOT_BASE));
+    }
+
+    #[test]
+    fn death_emits_event_and_drops_inventory() {
+        let mut w = SimWorld::new();
+        let mut p = Player::new(1, "p");
+        p.inventory.add_item(1, 1);
+        p.health = 0.0;
+        w.add_player(p);
+
+        w.tick(1.0 / 60.0);
+
+        assert!(
+            w.events
+                .iter()
+                .any(|e| matches!(e, GameEvent::PlayerDeath { player_id: 1, .. }))
+        );
+        assert!(w.loot.iter().any(|l| l.id >= ids::LOOT_BASE));
+        assert!(w.get_player(1).unwrap().inventory.items.is_empty());
     }
 }
