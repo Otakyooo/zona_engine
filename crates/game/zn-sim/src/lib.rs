@@ -661,6 +661,30 @@ mod tests {
     }
 
     #[test]
+    fn extraction_awards_xp_once() {
+        let mut w = SimWorld::new();
+        let mut p = Player::new(1, "p");
+        p.position = Vec3::new(0.0, 0.8, 0.0);
+        w.add_player(p);
+        w.extraction_zones.push(ExtractionZone {
+            id: 1,
+            position: Vec3::new(0.0, 0.0, 0.0),
+            radius: 3.0,
+        });
+
+        // ~11.7 с: таймер зоны (10 с) успевает сработать ровно один раз
+        for _ in 0..700 {
+            w.tick(1.0 / 60.0);
+        }
+
+        assert_eq!(
+            w.get_player(1).unwrap().xp,
+            100,
+            "XP за экстракцию должен начисляться один раз"
+        );
+    }
+
+    #[test]
     fn angle_correction_ignores_small_delta() {
         assert!(correct_angles((1.0, 0.0), (1.1, 0.1)).is_none());
         let (yaw, _) = correct_angles((1.0, 0.0), (2.0, 0.0)).unwrap();
@@ -674,7 +698,8 @@ mod tests {
         assert_eq!(classify(2), Some(IdKind::Item));
         assert_eq!(classify(ARTIFACT_BASE + 1), Some(IdKind::Artifact));
         assert_eq!(classify(ids::LOOT_BASE), Some(IdKind::Loot));
-        assert!(ARTIFACT_BASE + 1 > ITEM_MAX);
+        // за пределами всех диапазонов — не опознаётся
+        assert_eq!(classify(ITEM_MAX + 1), None);
         assert_eq!(classify(0), None);
     }
 

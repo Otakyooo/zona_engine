@@ -81,3 +81,12 @@ For a release update (only when explicitly requested by user):
 - Build boxes with `zn_render::geom::make_box(&Transform, color, tile_m)` — 24 vertices, per-face normals, UVs measured in metres. Do not bake transforms into vertex data; pass the transform in.
 - Textures are loaded once in `resumed()` into `App::textures`; never create a texture inside the per-entity mesh rebuild path.
 
+## Server rules
+
+- The simulation (`zn-sim`) owns world state: damage, death, loot drops, extraction timers and XP. The server owns persistence — it only reads/writes `profiles`, `inventory_items` and `sessions`.
+- Death loot is created in `SimWorld::tick` before the respawn, with ids from `next_loot_id`. Never spawn loot from a `GameEvent` handler — by then the player has already respawned.
+- Ids are namespaced via `zn_sim::ids`: items `1..=999`, loot `1_000_000+`, artifacts `2_000_000+`, creatures `3_000_000+`. Classify, don't guess; client and server must agree.
+- Frames are capped at `zn_net::MAX_FRAME_BYTES` (64 KiB). Raise the constant, never allocate from the wire length directly.
+- Sessions live in the `sessions` table; `Connect` validates the token with an expiry check, disconnect deletes it, and a sweep drops expired rows. There is no in-memory token cache.
+- Login and register attempts are limited per peer IP (5 per 5 minutes, reset on success).
+
