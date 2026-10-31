@@ -284,7 +284,7 @@ impl SimWorld {
         if let Some(p) = self.get_player_mut(player_id) {
             p.yaw = cmd.yaw;
             p.pitch = cmd.pitch;
-            let forward = Vec3::new(cmd.yaw.sin(), 0.0, cmd.yaw.cos());
+            let forward = Vec3::new(cmd.yaw.cos(), 0.0, cmd.yaw.sin());
             let right = Vec3::new(forward.z, 0.0, -forward.x);
             let mut vel = forward * (-cmd.move_z) + right * cmd.move_x;
             vel *= 5.0;

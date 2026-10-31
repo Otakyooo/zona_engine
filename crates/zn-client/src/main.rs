@@ -349,7 +349,7 @@ impl ApplicationHandler for App {
 
                 // movement (simplified, matching server)
                 let move_vec = self.input.movement_vector();
-                let forward = Vec3::new(self.yaw.sin(), 0.0, self.yaw.cos());
+                let forward = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin());
                 let right = Vec3::new(forward.z, 0.0, -forward.x);
                 let mut vel = forward * (-move_vec.z) + right * move_vec.x;
                 vel *= 5.0;
