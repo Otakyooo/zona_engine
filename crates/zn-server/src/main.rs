@@ -3,9 +3,9 @@ use clap::Parser;
 use password_hash::{SaltString, rand_core::OsRng};
 use sqlx::sqlite::SqlitePool;
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -74,18 +74,20 @@ async fn main() -> anyhow::Result<()> {
         radius: 3.0,
     });
     let mut writers: HashMap<u64, Arc<Mutex<OwnedWriteHalf>>> = HashMap::new();
-    let mut tokens: HashMap<String, i64> = HashMap::new();
     let mut token_to_player: HashMap<String, u64> = HashMap::new();
+    let mut player_to_token: HashMap<u64, String> = HashMap::new();
     let mut player_to_user: HashMap<u64, i64> = HashMap::new();
     let mut conn_to_player: HashMap<u64, u64> = HashMap::new();
+    let mut conn_addrs: HashMap<u64, SocketAddr> = HashMap::new();
     let mut client_addrs: HashMap<u64, SocketAddr> = HashMap::new();
     let mut addr_to_client: HashMap<SocketAddr, u64> = HashMap::new();
     let mut next_id: u64 = 1;
-    let mut failed_logins: HashMap<String, u32> = HashMap::new();
+    let mut login_attempts: HashMap<IpAddr, Attempts> = HashMap::new();
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<(u64, ClientPacket)>(1024);
 
     let mut tick_timer = interval(Duration::from_millis(1000 / 60));
     let mut save_timer = interval(Duration::from_secs(60));
+    let mut session_sweep = interval(Duration::from_secs(600));
     let mut snapshot_counter: u32 = 0;
 
     let mut udp_buf = vec![0u8; 65535];
@@ -97,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
                 let id = next_id;
                 next_id += 1;
                 writers.insert(id, Arc::new(Mutex::new(write_half)));
+                conn_addrs.insert(id, addr);
 
                 let tx = cmd_tx.clone();
                 tokio::spawn(async move {
@@ -122,13 +125,14 @@ async fn main() -> anyhow::Result<()> {
                     if let Ok(pkt) = bincode::deserialize::<ClientPacket>(data) {
                         match pkt {
                             ClientPacket::Connect { token } => {
-                                if let Some(&uid) = tokens.get(&token) {
+                                if let Some(uid) = validate_session(&pool, &token).await {
                                     // resolve or create player id
                                     let pid = *token_to_player.entry(token.clone()).or_insert_with(|| {
                                         let p = next_id;
                                         next_id += 1;
                                         p
                                     });
+                                    player_to_token.insert(pid, token.clone());
                                     let (player, profile, inventory) = spawn_player(&pool, uid, pid).await;
                                     if let std::collections::hash_map::Entry::Vacant(e) = player_to_user.entry(pid) {
                                         e.insert(uid);
@@ -182,6 +186,9 @@ async fn main() -> anyhow::Result<()> {
                                 world.remove_player(pid);
                                 player_to_user.remove(&pid);
                                 token_to_player.retain(|_, v| *v != pid);
+                                if let Some(token) = player_to_token.remove(&pid) {
+                                    delete_session(&pool, &token).await;
+                                }
                                 if let Some(a) = client_addrs.remove(&pid) {
                                     addr_to_client.remove(&a);
                                 }
@@ -189,13 +196,23 @@ async fn main() -> anyhow::Result<()> {
                             }
                             writers.remove(&conn_id);
                             conn_to_player.remove(&conn_id);
+                            conn_addrs.remove(&conn_id);
                         }
                     }
                     ClientPacket::Register { username, password } => {
+                        let ip = conn_addrs.get(&conn_id).map(|a| a.ip());
+                        if let Some(ip) = ip
+                            && !allow_attempt(&mut login_attempts, ip, Instant::now())
+                        {
+                            if let Some(w) = writers.get(&conn_id) {
+                                let mut g = w.lock().await;
+                                let _ = send_packet(&mut *g, &ServerPacket::LoginResult { ok: false, token: None, error: Some("too many attempts, try again later".into()) }).await;
+                            }
+                            continue;
+                        }
                         let result = handle_register(&pool, &username, &password).await;
                         match result {
-                            Ok((token, uid)) => {
-                                tokens.insert(token.clone(), uid);
+                            Ok((token, _uid)) => {
                                 if let Some(w) = writers.get(&conn_id) {
                                     let mut g = w.lock().await;
                                     let _ = send_packet(&mut *g, &ServerPacket::LoginResult { ok: true, token: Some(token), error: None }).await;
@@ -210,25 +227,28 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                     ClientPacket::Login { username, password } => {
-                        if *failed_logins.get(&username).unwrap_or(&0) >= 5 {
+                        let ip = conn_addrs.get(&conn_id).map(|a| a.ip());
+                        if let Some(ip) = ip
+                            && !allow_attempt(&mut login_attempts, ip, Instant::now())
+                        {
                             if let Some(w) = writers.get(&conn_id) {
                                 let mut g = w.lock().await;
-                                let _ = send_packet(&mut *g, &ServerPacket::LoginResult { ok: false, token: None, error: Some("too many attempts".into()) }).await;
+                                let _ = send_packet(&mut *g, &ServerPacket::LoginResult { ok: false, token: None, error: Some("too many attempts, try again later".into()) }).await;
                             }
                             continue;
                         }
                         let result = handle_login(&pool, &username, &password).await;
                         match result {
-                            Ok((token, uid)) => {
-                                failed_logins.remove(&username);
-                                tokens.insert(token.clone(), uid);
+                            Ok((token, _uid)) => {
+                                if let Some(ip) = ip {
+                                    login_attempts.remove(&ip);
+                                }
                                 if let Some(w) = writers.get(&conn_id) {
                                     let mut g = w.lock().await;
                                     let _ = send_packet(&mut *g, &ServerPacket::LoginResult { ok: true, token: Some(token), error: None }).await;
                                 }
                             }
                             Err(e) => {
-                                *failed_logins.entry(username.clone()).or_insert(0) += 1;
                                 if let Some(w) = writers.get(&conn_id) {
                                     let mut g = w.lock().await;
                                     let _ = send_packet(&mut *g, &ServerPacket::LoginResult { ok: false, token: None, error: Some(e) }).await;
@@ -238,12 +258,13 @@ async fn main() -> anyhow::Result<()> {
                     }
                     ClientPacket::Connect { token } => {
                         // TCP fallback
-                        if let Some(&uid) = tokens.get(&token) {
+                        if let Some(uid) = validate_session(&pool, &token).await {
                             let pid = *token_to_player.entry(token.clone()).or_insert_with(|| {
                                 let p = next_id;
                                 next_id += 1;
                                 p
                             });
+                            player_to_token.insert(pid, token.clone());
                             let (player, profile, inventory) = spawn_player(&pool, uid, pid).await;
                             if let std::collections::hash_map::Entry::Vacant(e) = player_to_user.entry(pid) {
                                 e.insert(uid);
@@ -316,6 +337,11 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
                 }
+            }
+            _ = session_sweep.tick() => {
+                let _ = sqlx::query("DELETE FROM sessions WHERE expires_at < datetime('now')")
+                    .execute(&pool)
+                    .await;
             }
             _ = save_timer.tick() => {
                 for (pid, uid) in &player_to_user {
@@ -477,6 +503,54 @@ async fn handle_events(
             _ => {}
         }
     }
+}
+
+/// Сколько неудачных попыток входа допускается с одного IP за окно.
+const LOGIN_MAX_ATTEMPTS: u32 = 5;
+const LOGIN_WINDOW: Duration = Duration::from_secs(300);
+
+#[derive(Debug)]
+struct Attempts {
+    count: u32,
+    window_start: Instant,
+}
+
+/// Счётчик попыток по IP с фиксированным окном. Ключ — адрес, а не имя
+/// пользователя: иначе чужой человек мог заблокировать вход жертве.
+fn allow_attempt(map: &mut HashMap<IpAddr, Attempts>, ip: IpAddr, now: Instant) -> bool {
+    let entry = map.entry(ip).or_insert(Attempts {
+        count: 0,
+        window_start: now,
+    });
+    if now.duration_since(entry.window_start) >= LOGIN_WINDOW {
+        entry.count = 0;
+        entry.window_start = now;
+    }
+    if entry.count >= LOGIN_MAX_ATTEMPTS {
+        return false;
+    }
+    entry.count += 1;
+    true
+}
+
+/// Токен действителен только если он есть в БД и не истёк.
+/// Раньше токены жили в HashMap и не проверялись никогда.
+async fn validate_session(pool: &SqlitePool, token: &str) -> Option<i64> {
+    sqlx::query_scalar(
+        "SELECT user_id FROM sessions WHERE token = ? AND expires_at > datetime('now')",
+    )
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn delete_session(pool: &SqlitePool, token: &str) {
+    let _ = sqlx::query("DELETE FROM sessions WHERE token = ?")
+        .bind(token)
+        .execute(pool)
+        .await;
 }
 
 async fn handle_register(
@@ -692,6 +766,29 @@ mod tests {
             },
         });
         w
+    }
+
+    #[test]
+    fn rate_limit_blocks_after_five_attempts() {
+        let mut map: HashMap<IpAddr, Attempts> = HashMap::new();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let t0 = Instant::now();
+
+        for _ in 0..LOGIN_MAX_ATTEMPTS {
+            assert!(allow_attempt(&mut map, ip, t0));
+        }
+        assert!(
+            !allow_attempt(&mut map, ip, t0),
+            "шестая попытка должна блокироваться"
+        );
+
+        // соседний адрес не страдает от чужого перебора
+        let other: IpAddr = "10.0.0.2".parse().unwrap();
+        assert!(allow_attempt(&mut map, other, t0));
+
+        // окно истекло — снова можно
+        let later = t0 + LOGIN_WINDOW + Duration::from_secs(1);
+        assert!(allow_attempt(&mut map, ip, later));
     }
 
     #[test]
