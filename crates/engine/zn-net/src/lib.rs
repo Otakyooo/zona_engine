@@ -14,6 +14,10 @@ pub enum ClientPacket {
         username: String,
         password: String,
     },
+    Register {
+        username: String,
+        password: String,
+    },
     Connect {
         token: String,
     },

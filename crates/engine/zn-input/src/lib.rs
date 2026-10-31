@@ -44,10 +44,14 @@ impl InputState {
     }
     pub fn handle_window_event(&mut self, event: &WindowEvent) {
         if let WindowEvent::KeyboardInput { event, .. } = event {
-            use winit::keyboard::PhysicalKey;
-            if let PhysicalKey::Code(code) = event.physical_key {
-                self.set_key(code, event.state == winit::event::ElementState::Pressed);
-            }
+            self.handle_key_event(event);
+        }
+    }
+
+    pub fn handle_key_event(&mut self, event: &winit::event::KeyEvent) {
+        use winit::keyboard::PhysicalKey;
+        if let PhysicalKey::Code(code) = event.physical_key {
+            self.set_key(code, event.state == winit::event::ElementState::Pressed);
         }
     }
     pub fn add_mouse_delta(&mut self, dx: f32, dy: f32) {

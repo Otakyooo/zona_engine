@@ -46,7 +46,18 @@ migrations/ (in zn-server)
 - M6: launcher + delivery — done
 - M7: release hygiene (crash reporting, installer, CI release) — done
 
-## Notes
+## Post-patch checklist (for agents)
+
+After any code change, run:
+- `cargo fmt --all`
+- `cargo build --workspace`
+- `cargo test --workspace`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+
+For a release update (only when explicitly requested by user):
+- `cargo build --workspace --release`
+- update launcher version/manifest
+- publish via `gh release` (requires user approval)
 
 - `ELECTRON_RUN_AS_NODE` must be unset to run the Electron launcher.
 - Vulkan SDK recommended for Vulkan-primary development; wgpu falls back to DX12 without it.

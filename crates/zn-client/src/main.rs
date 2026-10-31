@@ -27,6 +27,8 @@ struct Cli {
     password: Option<String>,
     #[arg(long)]
     telemetry: bool,
+    #[arg(long)]
+    register: bool,
     #[arg(long, default_value = "127.0.0.1")]
     server: String,
     #[arg(long, default_value_t = 7777)]
@@ -39,6 +41,7 @@ struct App {
     input: InputState,
     camera: Camera,
     meshes: Vec<Mesh>,
+    entity_meshes: std::collections::HashMap<u64, (Mesh, glam::Vec3)>,
     last_time: Option<Instant>,
     yaw: f32,
     pitch: f32,
@@ -115,6 +118,11 @@ impl ApplicationHandler for App {
                                         .as_ref()
                                         .and_then(|ns| ns.get(i).copied())
                                         .unwrap_or([0.0, 1.0, 0.0]);
+                                    let wn = node
+                                        .transform
+                                        .matrix()
+                                        .transform_vector3(glam::Vec3::from(n))
+                                        .normalize_or_zero();
                                     let c = lm
                                         .colors
                                         .as_ref()
@@ -127,7 +135,7 @@ impl ApplicationHandler for App {
                                         .unwrap_or([0.0, 0.0]);
                                     vs.push(Vertex {
                                         position: [w.x, w.y, w.z],
-                                        normal: n,
+                                        normal: [wn.x, wn.y, wn.z],
                                         color: c,
                                         uv,
                                     });
@@ -228,6 +236,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                self.input.handle_key_event(event);
                 use winit::keyboard::PhysicalKey;
                 if event.state == winit::event::ElementState::Pressed
                     && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
@@ -309,8 +318,11 @@ impl ApplicationHandler for App {
                                 && let Some(ps) = snap.players.iter().find(|p| p.id == pid)
                             {
                                 let server_pos = ps.position;
-                                if self.local_pos.distance(server_pos) > 0.5 {
+                                let dist = self.local_pos.distance(server_pos);
+                                if dist > 2.0 {
                                     self.local_pos = server_pos;
+                                } else if dist > 0.5 {
+                                    self.local_pos = self.local_pos.lerp(server_pos, 0.25);
                                 }
                                 self.yaw = ps.yaw;
                                 self.pitch = ps.pitch;
@@ -387,54 +399,85 @@ impl ApplicationHandler for App {
                 let mut render_list: Vec<&Mesh> = self.meshes.iter().collect();
 
                 // build remote player meshes on the fly (cheap enough for M3)
-                let mut remote_meshes: Vec<Mesh> = Vec::new();
+                let mut entity_keys: Vec<u64> = Vec::new();
+                let mut keep_keys: std::collections::HashSet<u64> =
+                    std::collections::HashSet::new();
                 if let Some(snap) = &self.latest_snapshot
                     && let Some(pid) = self.player_id
                 {
+                    let renderer = self.renderer.as_ref().unwrap();
                     for ps in &snap.players {
                         if ps.id == pid {
                             continue;
                         }
-                        let cube =
-                            make_cube(ps.position + Vec3::new(0.0, 0.5, 0.0), 0.5, [0.2, 0.8, 0.2]);
-                        remote_meshes.push(
-                            self.renderer
-                                .as_ref()
-                                .unwrap()
-                                .create_mesh(&cube.0, &cube.1),
-                        );
+                        let key = ps.id;
+                        let pos = ps.position + Vec3::new(0.0, 0.5, 0.0);
+                        let needs = self
+                            .entity_meshes
+                            .get(&key)
+                            .map(|(_, p)| p.distance(pos) > 0.001)
+                            .unwrap_or(true);
+                        if needs {
+                            let cube = make_cube(pos, 0.5, [0.2, 0.8, 0.2]);
+                            let m = renderer.create_mesh(&cube.0, &cube.1);
+                            self.entity_meshes.insert(key, (m, pos));
+                        }
+                        entity_keys.push(key);
                     }
                     for c in &snap.creatures {
-                        let cube =
-                            make_cube(c.position + Vec3::new(0.0, 0.5, 0.0), 0.5, [0.8, 0.2, 0.2]);
-                        remote_meshes.push(
-                            self.renderer
-                                .as_ref()
-                                .unwrap()
-                                .create_mesh(&cube.0, &cube.1),
-                        );
+                        let key = c.id + 1_000_000;
+                        let pos = c.position + Vec3::new(0.0, 0.5, 0.0);
+                        let needs = self
+                            .entity_meshes
+                            .get(&key)
+                            .map(|(_, p)| p.distance(pos) > 0.001)
+                            .unwrap_or(true);
+                        if needs {
+                            let cube = make_cube(pos, 0.5, [0.8, 0.2, 0.2]);
+                            let m = renderer.create_mesh(&cube.0, &cube.1);
+                            self.entity_meshes.insert(key, (m, pos));
+                        }
+                        entity_keys.push(key);
                     }
                     for l in &snap.loot {
-                        let cube = make_cube(l.position, 0.3, [1.0, 1.0, 0.2]);
-                        remote_meshes.push(
-                            self.renderer
-                                .as_ref()
-                                .unwrap()
-                                .create_mesh(&cube.0, &cube.1),
-                        );
+                        let key = l.id + 2_000_000;
+                        let pos = l.position;
+                        let needs = self
+                            .entity_meshes
+                            .get(&key)
+                            .map(|(_, p)| p.distance(pos) > 0.001)
+                            .unwrap_or(true);
+                        if needs {
+                            let cube = make_cube(pos, 0.3, [1.0, 1.0, 0.2]);
+                            let m = renderer.create_mesh(&cube.0, &cube.1);
+                            self.entity_meshes.insert(key, (m, pos));
+                        }
+                        entity_keys.push(key);
                     }
                     for a in &snap.anomalies {
-                        let cube = make_cube(a.position, a.radius, [0.2, 0.2, 0.8]);
-                        remote_meshes.push(
-                            self.renderer
-                                .as_ref()
-                                .unwrap()
-                                .create_mesh(&cube.0, &cube.1),
-                        );
+                        let key = a.id + 3_000_000;
+                        let pos = a.position;
+                        let needs = self
+                            .entity_meshes
+                            .get(&key)
+                            .map(|(_, p)| p.distance(pos) > 0.001)
+                            .unwrap_or(true);
+                        if needs {
+                            let cube = make_cube(pos, a.radius, [0.2, 0.2, 0.8]);
+                            let m = renderer.create_mesh(&cube.0, &cube.1);
+                            self.entity_meshes.insert(key, (m, pos));
+                        }
+                        entity_keys.push(key);
                     }
                 }
-                for m in &remote_meshes {
-                    render_list.push(m);
+                for key in &entity_keys {
+                    keep_keys.insert(*key);
+                }
+                self.entity_meshes.retain(|k, _| keep_keys.contains(k));
+                for key in &entity_keys {
+                    if let Some((m, _)) = self.entity_meshes.get(key) {
+                        render_list.push(m);
+                    }
                 }
 
                 let render_items: Vec<(&Mesh, Option<&Texture>)> =
@@ -533,8 +576,17 @@ fn main() {
 
     // network thread
     let token = cli.token.clone();
-    let username = cli.username.clone().unwrap_or_else(|| "guest".into());
-    let password = cli.password.clone().unwrap_or_else(|| "guest".into());
+    let username = cli
+        .username
+        .clone()
+        .or_else(|| std::env::var("ZONA_USERNAME").ok())
+        .unwrap_or_else(|| "guest".into());
+    let password = cli
+        .password
+        .clone()
+        .or_else(|| std::env::var("ZONA_PASSWORD").ok())
+        .unwrap_or_else(|| "guest".into());
+    let register = cli.register;
     let server = cli.server.clone();
     let port = cli.port;
     thread::spawn(move || {
@@ -553,7 +605,11 @@ fn main() {
 
         let mut got_token = token;
         if got_token.is_none() {
-            let pkt = ClientPacket::Login { username, password };
+            let pkt = if register {
+                ClientPacket::Register { username, password }
+            } else {
+                ClientPacket::Login { username, password }
+            };
             if let Ok(data) = encode(&pkt) {
                 let _ = stream.write_all(&data);
             }
@@ -637,6 +693,7 @@ fn main() {
             far: 100.0,
         },
         meshes: Vec::new(),
+        entity_meshes: std::collections::HashMap::new(),
         last_time: None,
         yaw: 0.0,
         pitch: 0.0,

@@ -83,40 +83,107 @@ pub fn load_texture(path: &std::path::Path) -> Result<LoadedTexture, Box<dyn std
 }
 pub fn load_gltf(path: &std::path::Path) -> Result<LoadedMesh, Box<dyn std::error::Error>> {
     let (document, buffers, _images) = gltf::import(path)?;
-    let mesh = document.meshes().next().ok_or("no mesh in gltf")?;
-    let primitive = mesh.primitives().next().ok_or("no primitive")?;
-    let reader = primitive.reader(|buf| buffers.get(buf.index()).map(|b| &b[..]));
-
     let mut positions = Vec::new();
-    if let Some(pos_iter) = reader.read_positions() {
-        for p in pos_iter {
-            positions.push(p);
-        }
-    }
-    let normals = reader
-        .read_normals()
-        .map(|n| n.map(|nn| [nn[0], nn[1], nn[2]]).collect());
+    let mut normals = Vec::new();
+    let mut has_normals = false;
     let mut indices = Vec::new();
-    if let Some(idx_iter) = reader.read_indices() {
-        for i in idx_iter.into_u32() {
-            indices.push(i);
+    let mut has_colors = false;
+    let mut has_uvs = false;
+    let mut color_buf: Vec<[f32; 3]> = Vec::new();
+    let mut uv_buf: Vec<[f32; 2]> = Vec::new();
+
+    for mesh in document.meshes() {
+        for primitive in mesh.primitives() {
+            let reader = primitive.reader(|buf| buffers.get(buf.index()).map(|b| &b[..]));
+            let base = positions.len() as u32;
+            if let Some(pos_iter) = reader.read_positions() {
+                for p in pos_iter {
+                    positions.push(p);
+                }
+            }
+            let nrm: Option<Vec<[f32; 3]>> = reader
+                .read_normals()
+                .map(|n| n.map(|nn| [nn[0], nn[1], nn[2]]).collect());
+            if let Some(ns) = nrm {
+                if !has_normals {
+                    // pad previous
+                    while normals.len() < positions.len() - ns.len() {
+                        normals.push([0.0, 1.0, 0.0]);
+                    }
+                }
+                normals.extend(ns);
+                has_normals = true;
+            }
+            let col: Option<Vec<[f32; 3]>> = reader.read_colors(0).map(|c| {
+                c.into_rgb_f32()
+                    .map(|rgb| [rgb[0], rgb[1], rgb[2]])
+                    .collect()
+            });
+            if let Some(cs) = col {
+                if !has_colors {
+                    color_buf.resize(positions.len() - cs.len(), [1.0, 1.0, 1.0]);
+                }
+                color_buf.extend(cs);
+                has_colors = true;
+            }
+            let uv: Option<Vec<[f32; 2]>> = reader
+                .read_tex_coords(0)
+                .map(|t| t.into_f32().map(|uv| [uv[0], uv[1]]).collect());
+            if let Some(us) = uv {
+                if !has_uvs {
+                    uv_buf.resize(positions.len() - us.len(), [0.0, 0.0]);
+                }
+                uv_buf.extend(us);
+                has_uvs = true;
+            }
+            if let Some(idx_iter) = reader.read_indices() {
+                for i in idx_iter.into_u32() {
+                    indices.push(i + base);
+                }
+            } else {
+                let count = positions.len() as u32 - base;
+                for i in 0..count {
+                    indices.push(base + i);
+                }
+            }
         }
     }
-    let colors = reader.read_colors(0).map(|c| {
-        c.into_rgb_f32()
-            .map(|rgb| [rgb[0], rgb[1], rgb[2]])
-            .collect()
-    });
-    let uvs = reader
-        .read_tex_coords(0)
-        .map(|t| t.into_f32().map(|uv| [uv[0], uv[1]]).collect());
+
+    if positions.is_empty() {
+        return Err("no mesh in gltf".into());
+    }
+    let normals_opt = if has_normals {
+        // pad to positions length
+        while normals.len() < positions.len() {
+            normals.push([0.0, 1.0, 0.0]);
+        }
+        Some(normals)
+    } else {
+        None
+    };
+    let colors_opt = if has_colors {
+        while color_buf.len() < positions.len() {
+            color_buf.push([1.0, 1.0, 1.0]);
+        }
+        Some(color_buf)
+    } else {
+        None
+    };
+    let uvs_opt = if has_uvs {
+        while uv_buf.len() < positions.len() {
+            uv_buf.push([0.0, 0.0]);
+        }
+        Some(uv_buf)
+    } else {
+        None
+    };
 
     Ok(LoadedMesh {
         positions,
-        normals,
+        normals: normals_opt,
         indices,
-        colors,
-        uvs,
+        colors: colors_opt,
+        uvs: uvs_opt,
     })
 }
 

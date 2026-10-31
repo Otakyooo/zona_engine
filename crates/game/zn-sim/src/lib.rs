@@ -39,6 +39,7 @@ pub struct Player {
     pub skills: Vec<Skill>,
     pub equipped_weapon: String,
     pub equipped_armor: String,
+    pub inventory: Inventory,
 }
 
 impl Player {
@@ -60,6 +61,7 @@ impl Player {
             skills: Vec::new(),
             equipped_weapon: "pistol".into(),
             equipped_armor: "none".into(),
+            inventory: Inventory::default(),
         }
     }
     pub fn add_xp(&mut self, amount: i64) {
@@ -167,6 +169,7 @@ pub struct PlayerProfile {
     pub level: i32,
     pub xp: i64,
     pub currency: i64,
+    pub position: Vec3,
 }
 
 impl PlayerProfile {
@@ -177,6 +180,7 @@ impl PlayerProfile {
             level: 1,
             xp: 0,
             currency: 0,
+            position: Vec3::ZERO,
         }
     }
     pub fn add_xp(&mut self, amount: i64) {
@@ -195,6 +199,38 @@ pub struct InventoryItem {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Inventory {
     pub items: Vec<InventoryItem>,
+}
+
+impl Inventory {
+    pub fn add_item(&mut self, item_id: i64, quantity: i32) {
+        if let Some(it) = self.items.iter_mut().find(|i| i.item_id == item_id) {
+            it.quantity += quantity;
+        } else {
+            let slot = self.items.len() as i32;
+            self.items.push(InventoryItem {
+                item_id,
+                quantity,
+                slot,
+            });
+        }
+    }
+    pub fn remove_item(&mut self, item_id: i64, quantity: i32) -> bool {
+        if let Some(it) = self.items.iter_mut().find(|i| i.item_id == item_id)
+            && it.quantity >= quantity
+        {
+            it.quantity -= quantity;
+            if it.quantity <= 0 {
+                self.items.retain(|i| i.item_id != item_id);
+            }
+            return true;
+        }
+        false
+    }
+    pub fn has_item(&self, item_id: i64, quantity: i32) -> bool {
+        self.items
+            .iter()
+            .any(|i| i.item_id == item_id && i.quantity >= quantity)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -455,12 +491,48 @@ impl SimWorld {
             extraction_zones: self.extraction_zones.clone(),
         }
     }
+}
 
-    pub fn players_in_radius(&self, pos: Vec3, radius: f32) -> Vec<&Player> {
-        let r2 = radius * radius;
-        self.players
-            .iter()
-            .filter(|p| (p.position - pos).length_squared() <= r2)
-            .collect()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tick_applies_gravity() {
+        let mut w = SimWorld::new();
+        w.add_player(Player::new(1, "p"));
+        w.tick(1.0 / 60.0);
+        // gravity should place player on ground at 0.8
+        let y = w.get_player(1).unwrap().position.y;
+        assert!((y - 0.8).abs() < 0.01);
+    }
+
+    #[test]
+    fn anomaly_damages_player() {
+        let mut w = SimWorld::new();
+        w.add_player(Player::new(1, "p"));
+        // move player into anomaly at (5,0,5) radius 3
+        w.get_player_mut(1).unwrap().position = Vec3::new(5.0, 0.8, 5.0);
+        w.anomalies.push(Anomaly {
+            id: 1,
+            position: Vec3::new(5.0, 0.0, 5.0),
+            radius: 3.0,
+            damage: 5.0,
+            radiation: 10.0,
+        });
+        let hp0 = w.get_player(1).unwrap().health;
+        w.tick(1.0);
+        let hp1 = w.get_player(1).unwrap().health;
+        assert!(hp1 < hp0);
+    }
+
+    #[test]
+    fn inventory_add_remove() {
+        let mut inv = Inventory::default();
+        inv.add_item(1, 2);
+        assert!(inv.has_item(1, 2));
+        assert!(inv.remove_item(1, 1));
+        assert!(inv.has_item(1, 1));
+        assert!(!inv.remove_item(1, 5));
     }
 }
