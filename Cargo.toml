@@ -47,6 +47,7 @@ pollster = "0.4"
 gltf = "1"
 image = "0.25"
 egui-winit = "0.31"
+egui-wgpu = "0.31"
 eframe = { version = "0.31", features = ["wgpu"] }
 clap = { version = "4", features = ["derive"] }
 gilrs = "0.11"

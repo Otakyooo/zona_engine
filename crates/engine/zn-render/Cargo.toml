@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 winit.workspace = true
 wgpu.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 log.workspace = true

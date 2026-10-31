@@ -6728,6 +6728,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "clap",
+ "egui",
  "env_logger",
  "glam",
  "log",
@@ -6805,6 +6806,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
+ "egui",
+ "egui-wgpu",
  "glam",
  "log",
  "thiserror 1.0.69",
