@@ -24,6 +24,12 @@ pub enum ClientPacket {
         dir: [f32; 3],
         client_time: u64,
     },
+    Pickup {
+        entity_id: u64,
+    },
+    Consume {
+        item_id: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

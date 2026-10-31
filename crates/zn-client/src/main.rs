@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::event::{DeviceEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window, WindowId};
 use zn_input::InputState;
 use zn_net::{ClientPacket, ServerPacket, encode};
@@ -95,8 +96,9 @@ impl ApplicationHandler for App {
 
             let scene_opt = self
                 .scene_path
-                .as_ref()
-                .and_then(|p| load_scene(std::path::Path::new(p)).ok());
+                .clone()
+                .or_else(|| Some("maps/arena.ron".to_string()))
+                .and_then(|p| load_scene(std::path::Path::new(&p)).ok());
 
             if let Some(scene) = scene_opt {
                 for node in &scene.nodes {
@@ -194,8 +196,89 @@ impl ApplicationHandler for App {
                     self.camera.aspect = size.width as f32 / size.height as f32;
                 }
             }
-            WindowEvent::KeyboardInput { .. } => {
-                self.input.handle_window_event(&event);
+            WindowEvent::MouseInput { state, button, .. } => {
+                if !self.cursor_captured
+                    && *button == winit::event::MouseButton::Left
+                    && *state == winit::event::ElementState::Pressed
+                {
+                    self.cursor_captured = true;
+                    self.input.cursor_captured = true;
+                    if let Some(w) = self.window.as_ref() {
+                        let _ = w.set_cursor_grab(CursorGrabMode::Locked);
+                        w.set_cursor_visible(false);
+                    }
+                }
+                if *state == winit::event::ElementState::Pressed
+                    && *button == winit::event::MouseButton::Left
+                    && self.cursor_captured
+                {
+                    let origin = self.local_pos + Vec3::new(0.0, 1.6, 0.0);
+                    let dir = Vec3::new(
+                        self.yaw.cos() * self.pitch.cos(),
+                        self.pitch.sin(),
+                        self.yaw.sin() * self.pitch.cos(),
+                    );
+                    let _ = self.net_out.send(ClientPacket::Shot {
+                        seq: self.seq,
+                        origin: [origin.x, origin.y, origin.z],
+                        dir: [dir.x, dir.y, dir.z],
+                        client_time: 0,
+                    });
+                    self.seq += 1;
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } => {
+                use winit::keyboard::PhysicalKey;
+                if event.state == winit::event::ElementState::Pressed
+                    && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
+                {
+                    if self.cursor_captured {
+                        self.cursor_captured = false;
+                        self.input.cursor_captured = false;
+                        if let Some(w) = self.window.as_ref() {
+                            let _ = w.set_cursor_grab(CursorGrabMode::None);
+                            w.set_cursor_visible(true);
+                        }
+                    } else {
+                        self.cursor_captured = true;
+                        self.input.cursor_captured = true;
+                        if let Some(w) = self.window.as_ref() {
+                            let _ = w.set_cursor_grab(CursorGrabMode::Locked);
+                            w.set_cursor_visible(false);
+                        }
+                    }
+                }
+                // E: pickup
+                if event.state == winit::event::ElementState::Pressed
+                    && let PhysicalKey::Code(KeyCode::KeyE) = event.physical_key
+                    && let Some(snap) = &self.latest_snapshot
+                {
+                    let pos = self.local_pos;
+                    let mut best: Option<(u64, f32)> = None;
+                    for l in &snap.loot {
+                        let d = (l.position - pos).length();
+                        if d < 2.0 && (best.is_none() || d < best.unwrap().1) {
+                            best = Some((l.id, d));
+                        }
+                    }
+                    for a in &snap.artifacts {
+                        let d = (a.position - pos).length();
+                        if d < 2.0 && (best.is_none() || d < best.unwrap().1) {
+                            best = Some((a.id, d));
+                        }
+                    }
+                    if let Some((eid, _)) = best {
+                        let _ = self.net_out.send(ClientPacket::Pickup { entity_id: eid });
+                    }
+                }
+                if event.state == winit::event::ElementState::Pressed {
+                    if let PhysicalKey::Code(KeyCode::Digit1) = event.physical_key {
+                        let _ = self.net_out.send(ClientPacket::Consume { item_id: 1 });
+                    }
+                    if let PhysicalKey::Code(KeyCode::Digit2) = event.physical_key {
+                        let _ = self.net_out.send(ClientPacket::Consume { item_id: 2 });
+                    }
+                }
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();

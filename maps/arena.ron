@@ -1,0 +1,94 @@
+(
+    nodes: [
+        (
+            name: "floor",
+            transform: (
+                position: (0.0, 0.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (50.0, 1.0, 50.0),
+            ),
+            mesh: None,
+            color: (0.3, 0.35, 0.3),
+        ),
+        (
+            name: "wall_north",
+            transform: (
+                position: (0.0, 1.0, -25.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (50.0, 2.0, 1.0),
+            ),
+            mesh: None,
+            color: (0.5, 0.45, 0.4),
+        ),
+        (
+            name: "wall_south",
+            transform: (
+                position: (0.0, 1.0, 25.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (50.0, 2.0, 1.0),
+            ),
+            mesh: None,
+            color: (0.5, 0.45, 0.4),
+        ),
+        (
+            name: "wall_east",
+            transform: (
+                position: (25.0, 1.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 2.0, 50.0),
+            ),
+            mesh: None,
+            color: (0.5, 0.45, 0.4),
+        ),
+        (
+            name: "wall_west",
+            transform: (
+                position: (-25.0, 1.0, 0.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.0, 2.0, 50.0),
+            ),
+            mesh: None,
+            color: (0.5, 0.45, 0.4),
+        ),
+        (
+            name: "cover_1",
+            transform: (
+                position: (5.0, 0.5, 5.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (2.0, 1.0, 2.0),
+            ),
+            mesh: None,
+            color: (0.6, 0.5, 0.3),
+        ),
+        (
+            name: "cover_2",
+            transform: (
+                position: (-8.0, 0.5, -3.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (3.0, 1.0, 1.5),
+            ),
+            mesh: None,
+            color: (0.6, 0.5, 0.3),
+        ),
+        (
+            name: "cover_3",
+            transform: (
+                position: (12.0, 0.5, -10.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (1.5, 1.0, 3.0),
+            ),
+            mesh: None,
+            color: (0.6, 0.5, 0.3),
+        ),
+        (
+            name: "extraction_marker",
+            transform: (
+                position: (20.0, 0.1, 20.0),
+                rotation: (0.0, 0.0, 0.0, 1.0),
+                scale: (4.0, 0.2, 4.0),
+            ),
+            mesh: None,
+            color: (0.2, 0.8, 0.2),
+        ),
+    ],
+)

@@ -55,6 +55,9 @@ struct Uniforms {
     _pad_before: [f32; 3],
     _pad1: [f32; 3],
     _pad2: f32,
+    _pad4: [f32; 4],
+    camera_pos: [f32; 3],
+    _pad3: f32,
 }
 
 pub struct Renderer {
@@ -342,6 +345,9 @@ impl Renderer {
             _pad_before: [0.0; 3],
             _pad1: [0.0; 3],
             _pad2: 0.0,
+            _pad4: [0.0; 4],
+            camera_pos: [camera.eye.x, camera.eye.y, camera.eye.z],
+            _pad3: 0.0,
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
@@ -498,7 +504,11 @@ struct Uniforms {
     light_dir: vec3<f32>,
     _pad0: f32,
     ambient: f32,
+    _pad_before: vec3<f32>,
     _pad1: vec3<f32>,
+    _pad2: f32,
+    camera_pos: vec3<f32>,
+    _pad3: f32,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(1) @binding(0) var t_diffuse: texture_2d<f32>;
@@ -515,6 +525,7 @@ struct VertexOut {
     @location(0) color: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) world_pos: vec3<f32>,
 }
 
 @vertex
@@ -524,6 +535,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     out.color = in.color;
     out.normal = in.normal;
     out.uv = in.uv;
+    out.world_pos = in.position;
     return out;
 }
 
@@ -533,6 +545,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let ndotl = max(dot(normalize(in.normal), u.light_dir), 0.0);
     let light = u.ambient + (1.0 - u.ambient) * ndotl;
     let base = in.color * tex.rgb;
-    return vec4<f32>(base * light, 1.0);
+    // fog
+    let dist = distance(in.world_pos, u.camera_pos);
+    let fog_factor = clamp((60.0 - dist) / 60.0, 0.0, 1.0);
+    let fog_color = vec3<f32>(0.53, 0.81, 0.92);
+    let color = mix(fog_color, base * light, fog_factor);
+    return vec4<f32>(color, 1.0);
 }
 "#;

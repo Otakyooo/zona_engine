@@ -54,16 +54,28 @@ function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true
 
 async function fetchManifest(channel) {
   const url = 'https://github.com/Otakyooo/zona_engine/releases/latest/download/manifest.json';
+  const cachePath = path.join(userData, 'manifest.cache.json');
   const stubPath = path.join(__dirname, 'manifest.stub.json');
   try {
     const res = await fetch(url);
-    if (res.ok) return await res.json();
+    if (res.ok) {
+      const data = await res.json();
+      // cache
+      fs.writeFileSync(cachePath, JSON.stringify(data));
+      return data;
+    }
     throw new Error('HTTP ' + res.status);
   } catch (e) {
-    log('fetchManifest error: ' + e.message);
+    // try cache
+    if (fs.existsSync(cachePath)) {
+      try { return JSON.parse(fs.readFileSync(cachePath, 'utf8')); } catch {}
+    }
     if (fs.existsSync(stubPath)) {
       try { return JSON.parse(fs.readFileSync(stubPath, 'utf8')); } catch {}
     }
+    return { version: '0.0.0', files: [], error: e.message };
+  }
+}
     return { version: '0.0.0', files: [], error: e.message };
   }
 }
@@ -83,8 +95,10 @@ ipcMain.handle('check-update', async (_e, channel) => {
   const local = readVersion();
   const exe = path.join(getGameDir(), 'zn-client.exe');
   const exeMissing = !fs.existsSync(exe);
-  let needsUpdate = manifest.version !== local.version;
-  if (manifest.files && manifest.files.length === 0) {
+  const mv = String(manifest.version || '0.0.0').replace(/^v/, '');
+  const lv = String(local.version || '0.0.0').replace(/^v/, '');
+  let needsUpdate = mv !== lv;
+  if (!manifest.files || manifest.files.length === 0) {
     needsUpdate = exeMissing;
   }
   if (manifest.error) {

@@ -196,7 +196,57 @@ async fn main() -> anyhow::Result<()> {
                     ClientPacket::Input(cmd) => {
                         world.apply_input(id, &cmd);
                     }
-                    ClientPacket::Shot { .. } => {}
+                    ClientPacket::Shot { origin, dir, .. } => {
+                        // simple hit detection against creatures
+                        let o = glam::Vec3::from(origin);
+                        let d = glam::Vec3::from(dir).normalize_or_zero();
+                        // find closest creature hit
+                        let mut best: Option<(usize, f32)> = None;
+                        for (i, c) in world.creatures.iter().enumerate() {
+                            let to_c = c.position - o;
+                            let t = to_c.dot(d);
+                            if t < 0.0 {
+                                continue;
+                            }
+                            let closest = o + d * t;
+                            let dist = (closest - c.position).length();
+                            if dist <= 1.0 && (best.is_none() || t < best.unwrap().1) {
+                                best = Some((i, t));
+                            }
+                        }
+                        if let Some((i, _)) = best {
+                            let cid = world.creatures[i].id;
+                            world.creatures[i].health -= 20.0;
+                            if world.creatures[i].health <= 0.0 {
+                                world.creatures.remove(i);
+                                if let Some(p) = world.get_player_mut(id) {
+                                    p.add_xp(50);
+                                }
+                                log::info!("creature {} killed by player {}", cid, id);
+                            }
+                        }
+                    }
+                    ClientPacket::Pickup { entity_id } => {
+                        // remove loot/artifact if exists, add to player inventory (sim not tracked yet)
+                        if let Some(idx) = world.loot.iter().position(|l| l.id == entity_id) {
+                            world.loot.remove(idx);
+                            log::info!("player {} picked up loot {}", id, entity_id);
+                        }
+                        if let Some(idx) = world.artifacts.iter().position(|a| a.id == entity_id) {
+                            world.artifacts.remove(idx);
+                            if let Some(p) = world.get_player_mut(id) {
+                                p.health = (p.health + 20.0).min(p.max_health);
+                            }
+                            log::info!("player {} picked up artifact {}", id, entity_id);
+                        }
+                    }
+                    ClientPacket::Consume { item_id } => {
+                        if let Some(p) = world.get_player_mut(id) {
+                            // medkit: heal 30
+                            p.health = (p.health + 30.0).min(p.max_health);
+                            log::info!("player {} consumed item {}", id, item_id);
+                        }
+                    }
                 }
             }
             _ = tick_timer.tick() => {
