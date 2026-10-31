@@ -46,7 +46,8 @@ jobs:
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
-    needs: [build-rust, build-launcher]
+    # Релиз игры не должен зависеть от сборки Electron-лаунчера.
+    needs: [build-rust]
     permissions:
       contents: write
     steps:
@@ -70,9 +71,11 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           $base = "https://github.com/Otakyooo/zona_engine/releases/download/$tag"
+          $root = (Resolve-Path dist).Path
           $files = @()
-          Get-ChildItem dist -Recurse -File | ForEach-Object {
-            $rel = [System.IO.Path]::GetRelativePath("$PWD/dist", $_.FullName).Replace('\', '/')
+          Get-ChildItem dist -Recurse -File | Where-Object { $_.Name -ne 'manifest.json' } | ForEach-Object {
+            # Substring вместо [IO.Path]::GetRelativePath: он есть только в PowerShell 7.
+            $rel = $_.FullName.Substring($root.Length + 1).Replace('\', '/')
             # GitHub не принимает слэши в именах ассетов, поэтому файл в релизе
             # плоский, а вложенный путь живёт только в поле path — лаунчер сам
             # создаст каталоги при распаковке.

@@ -14,3 +14,7 @@ launcher/manifest.json
 .DS_Store
 Thumbs.db
 .workbuddy-ai/
+
+# локальная проверка упаковки
+dist/
+dist_test/
