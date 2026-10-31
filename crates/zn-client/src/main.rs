@@ -40,8 +40,9 @@ struct App {
     renderer: Option<Renderer>,
     input: InputState,
     camera: Camera,
-    meshes: Vec<Mesh>,
-    entity_meshes: std::collections::HashMap<u64, (Mesh, glam::Vec3)>,
+    scene_items: Vec<(Mesh, Option<String>)>,
+    entity_meshes: std::collections::HashMap<u64, (Mesh, glam::Vec3, &'static str)>,
+    textures: std::collections::HashMap<String, Texture>,
     last_time: Option<Instant>,
     yaw: f32,
     pitch: f32,
@@ -66,7 +67,7 @@ impl ApplicationHandler for App {
             let renderer = pollster::block_on(Renderer::new(window.clone())).expect("renderer");
 
             // meshes
-            let mut meshes: Vec<Mesh> = Vec::new();
+            let mut meshes: Vec<(Mesh, Option<String>)> = Vec::new();
 
             let scene_opt = self
                 .scene_path
@@ -126,7 +127,7 @@ impl ApplicationHandler for App {
                     } else {
                         make_box(&node.transform, color, node.tile_meters())
                     };
-                    meshes.push(renderer.create_mesh(&vs, &is));
+                    meshes.push((renderer.create_mesh(&vs, &is), node.texture.clone()));
                 }
             } else {
                 // карта не загрузилась — простейшая заглушка, чтобы было на чём стоять
@@ -139,7 +140,10 @@ impl ApplicationHandler for App {
                     [0.3, 0.35, 0.3],
                     2.0,
                 );
-                meshes.push(renderer.create_mesh(&floor.0, &floor.1));
+                meshes.push((
+                    renderer.create_mesh(&floor.0, &floor.1),
+                    Some("concrete".to_string()),
+                ));
                 for i in -2..=2 {
                     for j in -2..=2 {
                         let x = i as f32 * 4.0;
@@ -152,7 +156,10 @@ impl ApplicationHandler for App {
                             [0.8, 0.4, 0.2],
                             1.0,
                         );
-                        meshes.push(renderer.create_mesh(&cube.0, &cube.1));
+                        meshes.push((
+                            renderer.create_mesh(&cube.0, &cube.1),
+                            Some("metal".to_string()),
+                        ));
                     }
                 }
             }
@@ -167,6 +174,20 @@ impl ApplicationHandler for App {
                 far: 100.0,
             };
 
+            let mut textures = std::collections::HashMap::new();
+            for name in ["concrete", "metal", "rust", "dirt", "grass", "wood"] {
+                let path = std::path::Path::new("assets/textures").join(format!("{name}.png"));
+                match zn_assets::load_texture(&path) {
+                    Ok(lt) => {
+                        textures.insert(
+                            name.to_string(),
+                            renderer.create_texture_mipped(&lt.mip_levels, lt.width, lt.height),
+                        );
+                    }
+                    Err(e) => log::warn!("текстура {} не загружена: {e}", path.display()),
+                }
+            }
+
             let _ = window.set_cursor_grab(CursorGrabMode::Locked);
             window.set_cursor_visible(false);
 
@@ -175,7 +196,8 @@ impl ApplicationHandler for App {
             self.input = InputState::new();
             self.input.cursor_captured = true;
             self.camera = camera;
-            self.meshes = meshes;
+            self.scene_items = meshes;
+            self.textures = textures;
             self.last_time = Some(Instant::now());
             self.cursor_captured = true;
             self.local_pos = Vec3::new(0.0, 0.8, 0.0);
@@ -385,7 +407,11 @@ impl ApplicationHandler for App {
 
                 // render remote players as cubes (rebuilt each frame? optimize: reuse meshes; simple: append to meshes list is not ideal)
                 // We'll render base meshes only; remote players drawn by adding temporary meshes to a separate list.
-                let mut render_list: Vec<&Mesh> = self.meshes.iter().collect();
+                let mut render_list: Vec<(&Mesh, Option<&str>)> = self
+                    .scene_items
+                    .iter()
+                    .map(|(m, key)| (m, key.as_deref()))
+                    .collect();
 
                 // build remote player meshes on the fly (cheap enough for M3)
                 let mut entity_keys: Vec<u64> = Vec::new();
@@ -404,7 +430,7 @@ impl ApplicationHandler for App {
                         let needs = self
                             .entity_meshes
                             .get(&key)
-                            .map(|(_, p)| p.distance(pos) > 0.001)
+                            .map(|(_, p, _)| p.distance(pos) > 0.001)
                             .unwrap_or(true);
                         if needs {
                             let cube = make_box(
@@ -416,7 +442,7 @@ impl ApplicationHandler for App {
                                 1.0,
                             );
                             let m = renderer.create_mesh(&cube.0, &cube.1);
-                            self.entity_meshes.insert(key, (m, pos));
+                            self.entity_meshes.insert(key, (m, pos, "metal"));
                         }
                         entity_keys.push(key);
                     }
@@ -426,7 +452,7 @@ impl ApplicationHandler for App {
                         let needs = self
                             .entity_meshes
                             .get(&key)
-                            .map(|(_, p)| p.distance(pos) > 0.001)
+                            .map(|(_, p, _)| p.distance(pos) > 0.001)
                             .unwrap_or(true);
                         if needs {
                             let cube = make_box(
@@ -438,7 +464,7 @@ impl ApplicationHandler for App {
                                 1.0,
                             );
                             let m = renderer.create_mesh(&cube.0, &cube.1);
-                            self.entity_meshes.insert(key, (m, pos));
+                            self.entity_meshes.insert(key, (m, pos, "rust"));
                         }
                         entity_keys.push(key);
                     }
@@ -448,7 +474,7 @@ impl ApplicationHandler for App {
                         let needs = self
                             .entity_meshes
                             .get(&key)
-                            .map(|(_, p)| p.distance(pos) > 0.001)
+                            .map(|(_, p, _)| p.distance(pos) > 0.001)
                             .unwrap_or(true);
                         if needs {
                             let cube = make_box(
@@ -461,7 +487,7 @@ impl ApplicationHandler for App {
                                 1.0,
                             );
                             let m = renderer.create_mesh(&cube.0, &cube.1);
-                            self.entity_meshes.insert(key, (m, pos));
+                            self.entity_meshes.insert(key, (m, pos, "wood"));
                         }
                         entity_keys.push(key);
                     }
@@ -471,7 +497,7 @@ impl ApplicationHandler for App {
                         let needs = self
                             .entity_meshes
                             .get(&key)
-                            .map(|(_, p)| p.distance(pos) > 0.001)
+                            .map(|(_, p, _)| p.distance(pos) > 0.001)
                             .unwrap_or(true);
                         if needs {
                             let cube = make_box(
@@ -484,7 +510,7 @@ impl ApplicationHandler for App {
                                 1.0,
                             );
                             let m = renderer.create_mesh(&cube.0, &cube.1);
-                            self.entity_meshes.insert(key, (m, pos));
+                            self.entity_meshes.insert(key, (m, pos, "concrete"));
                         }
                         entity_keys.push(key);
                     }
@@ -494,13 +520,15 @@ impl ApplicationHandler for App {
                 }
                 self.entity_meshes.retain(|k, _| keep_keys.contains(k));
                 for key in &entity_keys {
-                    if let Some((m, _)) = self.entity_meshes.get(key) {
-                        render_list.push(m);
+                    if let Some((m, _, material)) = self.entity_meshes.get(key) {
+                        render_list.push((m, Some(*material)));
                     }
                 }
 
-                let render_items: Vec<(&Mesh, Option<&Texture>)> =
-                    render_list.iter().map(|m| (*m, None)).collect();
+                let render_items: Vec<(&Mesh, Option<&Texture>)> = render_list
+                    .iter()
+                    .map(|(m, key)| (*m, key.and_then(|k| self.textures.get(k))))
+                    .collect();
                 if let Some(r) = self.renderer.as_mut() {
                     let _ = r.render(&render_items, &self.camera);
                 }
@@ -672,8 +700,9 @@ fn main() {
             near: 0.1,
             far: 100.0,
         },
-        meshes: Vec::new(),
+        scene_items: Vec::new(),
         entity_meshes: std::collections::HashMap::new(),
+        textures: std::collections::HashMap::new(),
         last_time: None,
         yaw: 0.0,
         pitch: 0.0,

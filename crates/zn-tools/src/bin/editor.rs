@@ -29,6 +29,8 @@ impl eframe::App for EditorApp {
                         transform: Transform::default(),
                         mesh: None,
                         color: [0.8, 0.4, 0.2],
+                        texture: Some("concrete".into()),
+                        uv_scale: 1.0,
                     });
                 }
                 if ui.button("Save").clicked() {
@@ -83,6 +85,27 @@ impl eframe::App for EditorApp {
                     ui.horizontal(|ui| {
                         ui.label("z");
                         ui.add(egui::DragValue::new(&mut node.transform.position.z));
+                    });
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("material");
+                        let mut name = node.texture.clone().unwrap_or_default();
+                        if ui.text_edit_singleline(&mut name).changed() {
+                            let trimmed = name.trim();
+                            node.texture = if trimmed.is_empty() {
+                                None
+                            } else {
+                                Some(trimmed.to_string())
+                            };
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("tile m");
+                        ui.add(
+                            egui::DragValue::new(&mut node.uv_scale)
+                                .speed(0.1)
+                                .range(0.1..=64.0),
+                        );
                     });
                 }
             } else {

@@ -265,6 +265,18 @@ mod tests {
     }
 
     #[test]
+    fn shipped_textures_load_with_mips() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+        for name in ["concrete", "metal", "rust", "dirt", "grass", "wood"] {
+            let path = root.join(format!("assets/textures/{name}.png"));
+            let tex = load_texture(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!((tex.width, tex.height), (512, 512), "{name}");
+            assert_eq!(tex.mip_levels.len(), 10, "{name}");
+            assert_eq!(tex.mip_levels.last().unwrap().len(), 4, "{name}");
+        }
+    }
+
+    #[test]
     fn cache_insert_get() {
         let mut c = AssetCache::new();
         c.insert_mesh(
