@@ -36,6 +36,7 @@ pub struct Player {
     pub velocity: Vec3,
     pub xp: i64,
     pub level: i32,
+    pub currency: i64,
     pub skills: Vec<Skill>,
     pub equipped_weapon: String,
     pub equipped_armor: String,
@@ -58,6 +59,7 @@ impl Player {
             velocity: Vec3::ZERO,
             xp: 0,
             level: 1,
+            currency: 0,
             skills: Vec::new(),
             equipped_weapon: "pistol".into(),
             equipped_armor: "none".into(),
@@ -67,6 +69,15 @@ impl Player {
     pub fn add_xp(&mut self, amount: i64) {
         self.xp += amount;
         self.level = 1 + (self.xp / 1000) as i32;
+    }
+
+    /// Переносит сохранённый прогресс в живого игрока. Без этого `save_profile`
+    /// запишет в БД дефолтные `level = 1, xp = 0` и сотрёт прогресс.
+    pub fn apply_profile(&mut self, profile: &PlayerProfile) {
+        self.level = profile.level;
+        self.xp = profile.xp;
+        self.currency = profile.currency;
+        self.position = profile.position;
     }
 }
 

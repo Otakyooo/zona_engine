@@ -128,22 +128,16 @@ async fn main() -> anyhow::Result<()> {
                                         next_id += 1;
                                         p
                                     });
+                                    let (player, profile, inventory) = spawn_player(&pool, uid, pid).await;
                                     if let std::collections::hash_map::Entry::Vacant(e) = player_to_user.entry(pid) {
                                         e.insert(uid);
-                                        let profile = load_profile(&pool, uid).await.unwrap_or_else(|| PlayerProfile::new(uid, "player"));
-                                        let inventory = load_inventory(&pool, uid).await;
-                                        let mut p = Player::new(pid, profile.username.clone());
-                                        p.position = profile.position;
-                                        p.inventory = inventory;
-                                        world.add_player(p);
+                                        world.add_player(player);
                                     }
                                     if let std::collections::hash_map::Entry::Vacant(e) = addr_to_client.entry(addr) {
                                         e.insert(pid);
                                         client_addrs.insert(pid, addr);
                                     }
                                     // send Welcome + Profile via UDP
-                                    let profile = load_profile(&pool, uid).await.unwrap_or_else(|| PlayerProfile::new(uid, "player"));
-                                    let inventory = load_inventory(&pool, uid).await;
                                     let welcome = ServerPacket::Welcome { id: pid };
                                     if let Ok(d) = zn_net::encode(&welcome) { let _ = udp.socket.send_to(&d, addr).await; }
                                     let prof = ServerPacket::Profile { profile, inventory };
@@ -249,18 +243,12 @@ async fn main() -> anyhow::Result<()> {
                                 next_id += 1;
                                 p
                             });
+                            let (player, profile, inventory) = spawn_player(&pool, uid, pid).await;
                             if let std::collections::hash_map::Entry::Vacant(e) = player_to_user.entry(pid) {
                                 e.insert(uid);
-                                let profile = load_profile(&pool, uid).await.unwrap_or_else(|| PlayerProfile::new(uid, "player"));
-                                let inventory = load_inventory(&pool, uid).await;
-                                let mut p = Player::new(pid, profile.username.clone());
-                                p.position = profile.position;
-                                p.inventory = inventory;
-                                world.add_player(p);
+                                world.add_player(player);
                             }
                             conn_to_player.insert(conn_id, pid);
-                            let profile = load_profile(&pool, uid).await.unwrap_or_else(|| PlayerProfile::new(uid, "player"));
-                            let inventory = load_inventory(&pool, uid).await;
                             if let Some(w) = writers.get(&conn_id) {
                                 let mut g = w.lock().await;
                                 let _ = send_packet(&mut *g, &ServerPacket::Profile { profile, inventory }).await;
@@ -563,6 +551,22 @@ async fn load_profile(pool: &SqlitePool, user_id: i64) -> Option<PlayerProfile> 
     }
 }
 
+/// Создаёт игрока с уже применённым сохранённым прогрессом.
+///
+/// Профиль и инвентарь читаются один раз: раньше оба пути подключения грузили
+/// их дважды, а `level`/`xp`/`currency` вообще не переносились в `Player`,
+/// из-за чего первое же сохранение обнуляло прогресс.
+async fn spawn_player(pool: &SqlitePool, uid: i64, pid: u64) -> (Player, PlayerProfile, Inventory) {
+    let profile = load_profile(pool, uid)
+        .await
+        .unwrap_or_else(|| PlayerProfile::new(uid, "player"));
+    let inventory = load_inventory(pool, uid).await;
+    let mut player = Player::new(pid, profile.username.clone());
+    player.apply_profile(&profile);
+    player.inventory = inventory.clone();
+    (player, profile, inventory)
+}
+
 async fn load_inventory(pool: &SqlitePool, user_id: i64) -> Inventory {
     let rows: Vec<(i64, i32, i32)> =
         sqlx::query_as("SELECT item_id, quantity, slot FROM inventory_items WHERE user_id = ?")
@@ -591,7 +595,7 @@ async fn save_profile(pool: &SqlitePool, user_id: i64, player: Option<&Player>) 
         .bind(user_id)
         .bind(p.level)
         .bind(p.xp)
-        .bind(0i64)
+        .bind(p.currency)
         .bind(p.position.x)
         .bind(p.position.y)
         .bind(p.position.z)
