@@ -62,3 +62,14 @@ For a release update (only when explicitly requested by user):
 - `ELECTRON_RUN_AS_NODE` must be unset to run the Electron launcher.
 - Vulkan SDK recommended for Vulkan-primary development; wgpu falls back to DX12 without it.
 - Repository: https://github.com/Otakyooo/zona_engine
+
+## Local workspace (WorkBuddy)
+
+- Root: `C:\Users\russi\WorkBuddy AI\Zona_games` (path contains a space — quote it in shell commands).
+- Migrated from `E:\zona_engine` on 2026-10-31 via local clone; the old copy is kept as a backup.
+- Durable agent notes live in `.workbuddy-ai/memory/` (git-ignored).
+- Do not set a global `CARGO_TARGET_DIR`: `ci/installer.iss` and CI expect the relative `target/` directory.
+- Verify after every change: `cargo fmt --all -- --check`, `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`.
+- Launcher check without a GUI session: `node --check launcher/main.js`, then `npm start` with `ELECTRON_RUN_AS_NODE` unset.
+- `launcher/manifest.stub.json` points at the local `launcher/game/zn-client.exe` (offline fallback); keep its path and sha256 in sync with the payload.
+

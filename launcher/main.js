@@ -76,9 +76,6 @@ async function fetchManifest(channel) {
     return { version: '0.0.0', files: [], error: e.message };
   }
 }
-    return { version: '0.0.0', files: [], error: e.message };
-  }
-}
 
 function sha256File(filePath) {
   return new Promise((resolve, reject) => {

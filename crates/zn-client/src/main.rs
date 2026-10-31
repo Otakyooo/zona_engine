@@ -342,7 +342,7 @@ impl ApplicationHandler for App {
                     self.yaw += dx * 0.002;
                     self.pitch = (self.pitch - dy * 0.002).clamp(-1.4, 1.4);
                     // gamepad right stick
-                        self.yaw += self.input.gamepad_right.0 * dt * 2.0;
+                    self.yaw += self.input.gamepad_right.0 * dt * 2.0;
                     self.pitch =
                         (self.pitch - self.input.gamepad_right.1 * dt * 2.0).clamp(-1.4, 1.4);
                 }
