@@ -368,6 +368,22 @@ impl SimWorld {
         }
         dropped
     }
+
+    /// Помечает игроков с нулевым здоровьем.
+    ///
+    /// Вызывать после всех источников урона: урон существ применяется позже
+    /// движения, и раньше такие смерти не попадали в обработку вообще —
+    /// игрок оставался с нулевым HP без респауна.
+    pub fn collect_deaths(&mut self, dead: &mut Vec<u64>) {
+        for p in self.players.iter_mut() {
+            if p.health <= 0.0 {
+                p.health = 0.0;
+                if !dead.contains(&p.id) {
+                    dead.push(p.id);
+                }
+            }
+        }
+    }
     pub fn apply_input(&mut self, player_id: u64, cmd: &InputCommand) {
         if let Some(p) = self.get_player_mut(player_id) {
             p.yaw = cmd.yaw;
@@ -428,11 +444,6 @@ impl SimWorld {
             if p.radiation > 50.0 {
                 p.health -= (p.radiation - 50.0) * 0.01 * dt;
             }
-
-            if p.health <= 0.0 {
-                p.health = 0.0;
-                dead_players.push(p.id);
-            }
         }
 
         // extraction timers
@@ -460,28 +471,6 @@ impl SimWorld {
                 p.add_xp(100);
             }
             self.extraction_timers.remove(pid);
-        }
-
-        // handle deaths
-        for pid in &dead_players {
-            // Позиция читается до респауна — иначе лут падает в начало координат.
-            let death_pos = self
-                .get_player(*pid)
-                .map(|p| p.position)
-                .unwrap_or_default();
-            let dropped_loot = self.drop_inventory_at(*pid, death_pos);
-            self.events.push(GameEvent::PlayerDeath {
-                player_id: *pid,
-                dropped_loot,
-                dropped_consumables: Vec::new(),
-            });
-            if let Some(p) = self.get_player_mut(*pid) {
-                p.health = p.max_health;
-                p.position = Vec3::ZERO;
-                p.radiation = 0.0;
-                p.hunger = 100.0;
-                p.thirst = 100.0;
-            }
         }
 
         // creature AI
@@ -548,6 +537,32 @@ impl SimWorld {
                 if p.health <= 0.0 {
                     p.health = 0.0;
                 }
+            }
+        }
+
+        // Смерти собираются после всех источников урона: урон существ
+        // применяется позже движения, и раньше такие смерти терялись.
+        self.collect_deaths(&mut dead_players);
+
+        // handle deaths
+        for pid in &dead_players {
+            // Позиция читается до респауна — иначе лут падает в начало координат.
+            let death_pos = self
+                .get_player(*pid)
+                .map(|p| p.position)
+                .unwrap_or_default();
+            let dropped_loot = self.drop_inventory_at(*pid, death_pos);
+            self.events.push(GameEvent::PlayerDeath {
+                player_id: *pid,
+                dropped_loot,
+                dropped_consumables: Vec::new(),
+            });
+            if let Some(p) = self.get_player_mut(*pid) {
+                p.health = p.max_health;
+                p.position = Vec3::ZERO;
+                p.radiation = 0.0;
+                p.hunger = 100.0;
+                p.thirst = 100.0;
             }
         }
         // remove dead creatures
@@ -656,6 +671,39 @@ mod tests {
         assert_eq!(w.loot.len(), 2);
         assert_ne!(w.loot[0].id, w.loot[1].id);
         assert!(w.loot.iter().all(|l| l.id >= ids::LOOT_BASE));
+    }
+
+    #[test]
+    fn creature_kill_produces_one_death_event() {
+        let mut w = SimWorld::new();
+        let mut p = Player::new(1, "p");
+        p.position = Vec3::new(0.0, 0.8, 0.0);
+        p.health = 1.0;
+        p.inventory.add_item(1, 1);
+        w.add_player(p);
+        w.creatures.push(Creature {
+            id: 1,
+            position: Vec3::new(0.5, 0.8, 0.0),
+            health: 50.0,
+            max_health: 50.0,
+            state: CreatureState::Attack,
+            target: Some(1),
+            damage: 100.0,
+        });
+
+        w.tick(1.0 / 60.0);
+
+        let deaths = w
+            .events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::PlayerDeath { player_id: 1, .. }))
+            .count();
+        assert_eq!(
+            deaths, 1,
+            "смерть от существа должна дать ровно одно событие"
+        );
+        assert!(w.loot.iter().any(|l| l.id >= ids::LOOT_BASE));
+        assert_eq!(w.get_player(1).unwrap().health, 100.0);
     }
 
     #[test]
