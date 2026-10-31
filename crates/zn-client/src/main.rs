@@ -51,6 +51,7 @@ struct App {
     inventory: zn_sim::Inventory,
     extract_elapsed: f32,
     fps: f32,
+    net_dead: bool,
     last_time: Option<Instant>,
     yaw: f32,
     pitch: f32,
@@ -321,14 +322,29 @@ impl ApplicationHandler for App {
                 self.fps = self.fps * 0.9 + 0.1 / dt.max(1e-4);
 
                 // poll inbound
-                while let Ok(pkt) = self.net_in.try_recv() {
+                loop {
+                    let pkt = match self.net_in.try_recv() {
+                        Ok(p) => p,
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            if !self.net_dead {
+                                self.net_dead = true;
+                                self.hud
+                                    .toasts
+                                    .push(("connection lost".into(), Instant::now()));
+                            }
+                            break;
+                        }
+                    };
                     match pkt {
                         ServerPacket::Welcome { id } => {
                             self.player_id = Some(id);
                         }
                         ServerPacket::LoginResult { ok, error, .. } => {
                             if !ok {
-                                log::error!("login failed: {:?}", error);
+                                let text = error.unwrap_or_else(|| "login failed".into());
+                                log::error!("login failed: {text}");
+                                self.hud.toasts.push((text, Instant::now()));
                             }
                         }
                         ServerPacket::Profile { profile, inventory } => {
@@ -444,6 +460,10 @@ impl ApplicationHandler for App {
                 }
                 self.hud.inventory = hud::format_inventory(&self.inventory);
                 self.hud.fps = self.fps;
+                // Просроченные сообщения убираем, иначе очередь растёт бесконечно.
+                self.hud
+                    .toasts
+                    .retain(|(_, at)| now.duration_since(*at).as_secs_f32() <= hud::TOAST_TTL);
 
                 // camera
                 let eye = self.local_pos + Vec3::new(0.0, 1.6, 0.0);
@@ -803,6 +823,7 @@ fn main() {
         inventory: zn_sim::Inventory::default(),
         extract_elapsed: 0.0,
         fps: 0.0,
+        net_dead: false,
         last_time: None,
         yaw: 0.0,
         pitch: 0.0,
