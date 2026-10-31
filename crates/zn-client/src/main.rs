@@ -627,6 +627,10 @@ fn main() {
                 let mut len_buf = [0u8; 4];
                 if stream.read_exact(&mut len_buf).is_ok() {
                     let len = u32::from_le_bytes(len_buf) as usize;
+                    if len > zn_net::MAX_FRAME_BYTES {
+                        log::error!("server sent oversized frame: {len} bytes");
+                        break;
+                    }
                     let mut buf = vec![0u8; len];
                     if stream.read_exact(&mut buf).is_ok()
                         && let Ok(ServerPacket::LoginResult { ok, token, .. }) =

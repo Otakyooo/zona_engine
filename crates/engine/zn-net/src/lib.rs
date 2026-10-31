@@ -65,6 +65,54 @@ pub fn encode<T: Serialize>(packet: &T) -> Result<Vec<u8>, Box<dyn std::error::E
     Ok(out)
 }
 
+/// Максимальный размер кадра.
+///
+/// Снапшот текущей карты — около 1 КиБ на игрока плюс семь сущностей, так что
+/// 64 КиБ с большим запасом. Раньше длина из сети шла прямо в `vec![0u8; len]`,
+/// и один пакет мог попросить до 4 ГиБ. Если число сущностей вырастет, поднимать
+/// здесь — константа одна на всех.
+pub const MAX_FRAME_BYTES: usize = 64 * 1024;
+
+#[derive(Debug)]
+pub enum FrameError {
+    Io(std::io::Error),
+    TooLarge(usize),
+}
+
+impl std::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FrameError::Io(e) => write!(f, "ошибка чтения кадра: {e}"),
+            FrameError::TooLarge(n) => {
+                write!(f, "кадр {n} байт превышает лимит {MAX_FRAME_BYTES}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FrameError {}
+
+/// Читает кадр с 4-байтовым префиксом длины, отказываясь выделять память
+/// под размер, который клиент не имеет права присылать.
+pub async fn read_frame<R>(reader: &mut R) -> Result<Vec<u8>, FrameError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut len_buf = [0u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(FrameError::Io)?;
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_FRAME_BYTES {
+        return Err(FrameError::TooLarge(len));
+    }
+    let mut buf = vec![0u8; len];
+    reader.read_exact(&mut buf).await.map_err(FrameError::Io)?;
+    Ok(buf)
+}
+
 pub fn decode_client(bytes: &[u8]) -> Result<ClientPacket, Box<dyn std::error::Error>> {
     Ok(bincode::deserialize(bytes)?)
 }
@@ -163,12 +211,7 @@ where
 pub async fn recv_packet<T: for<'de> Deserialize<'de>>(
     stream: &mut tokio::net::TcpStream,
 ) -> Result<T, Box<dyn std::error::Error>> {
-    use tokio::io::AsyncReadExt;
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf).await?;
+    let buf = read_frame(stream).await?;
     Ok(bincode::deserialize(&buf)?)
 }
 
@@ -186,6 +229,30 @@ mod tests {
         let client: ClientPacket = bincode::deserialize(&data[4..]).unwrap();
         match client {
             ClientPacket::Hello { name } => assert_eq!(name, "test"),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_size_guard_rejects_oversized_length() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&((MAX_FRAME_BYTES as u32) + 1).to_le_bytes());
+        data.extend_from_slice(&[0u8; 16]);
+        let mut cursor: &[u8] = &data;
+        match read_frame(&mut cursor).await {
+            Err(FrameError::TooLarge(n)) => assert_eq!(n, MAX_FRAME_BYTES + 1),
+            other => panic!("ожидали TooLarge, получили {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_reads_valid_payload() {
+        let pkt = ClientPacket::Consume { item_id: 7 };
+        let data = encode(&pkt).unwrap();
+        let mut cursor: &[u8] = &data;
+        let buf = read_frame(&mut cursor).await.unwrap();
+        match bincode::deserialize::<ClientPacket>(&buf).unwrap() {
+            ClientPacket::Consume { item_id } => assert_eq!(item_id, 7),
             _ => panic!("wrong variant"),
         }
     }

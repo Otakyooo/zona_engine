@@ -100,14 +100,15 @@ async fn main() -> anyhow::Result<()> {
 
                 let tx = cmd_tx.clone();
                 tokio::spawn(async move {
-                    use tokio::io::AsyncReadExt;
                     let mut rh = read_half;
                     loop {
-                        let mut len_buf = [0u8; 4];
-                        if rh.read_exact(&mut len_buf).await.is_err() { break; }
-                        let len = u32::from_le_bytes(len_buf) as usize;
-                        let mut buf = vec![0u8; len];
-                        if rh.read_exact(&mut buf).await.is_err() { break; }
+                        let buf = match zn_net::read_frame(&mut rh).await {
+                            Ok(b) => b,
+                            Err(e) => {
+                                log::warn!("conn {}: {}", id, e);
+                                break;
+                            }
+                        };
                         if let Ok(pkt) = bincode::deserialize::<ClientPacket>(&buf) {
                             let _ = tx.send((id, pkt)).await;
                         }
