@@ -11,8 +11,8 @@ use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window, WindowId};
 use zn_input::InputState;
 use zn_net::{ClientPacket, ServerPacket, encode};
-use zn_render::{Camera, Mesh, Renderer, Texture, Vertex};
-use zn_scene::load_scene;
+use zn_render::{Camera, Mesh, Renderer, Texture, Vertex, geom::make_box};
+use zn_scene::{Transform, load_scene};
 use zn_sim::{InputCommand, Snapshot};
 
 #[derive(Parser, Debug)]
@@ -66,36 +66,7 @@ impl ApplicationHandler for App {
             let renderer = pollster::block_on(Renderer::new(window.clone())).expect("renderer");
 
             // meshes
-            let floor_verts = vec![
-                Vertex {
-                    position: [-20.0, 0.0, -20.0],
-                    normal: [0.0, 1.0, 0.0],
-                    color: [0.3, 0.35, 0.3],
-                    uv: [0.0, 0.0],
-                },
-                Vertex {
-                    position: [20.0, 0.0, -20.0],
-                    normal: [0.0, 1.0, 0.0],
-                    color: [0.3, 0.35, 0.3],
-                    uv: [1.0, 0.0],
-                },
-                Vertex {
-                    position: [20.0, 0.0, 20.0],
-                    normal: [0.0, 1.0, 0.0],
-                    color: [0.3, 0.35, 0.3],
-                    uv: [1.0, 1.0],
-                },
-                Vertex {
-                    position: [-20.0, 0.0, 20.0],
-                    normal: [0.0, 1.0, 0.0],
-                    color: [0.3, 0.35, 0.3],
-                    uv: [0.0, 1.0],
-                },
-            ];
-            let floor_idx = vec![0, 2, 1, 0, 3, 2];
-            let floor_mesh = renderer.create_mesh(&floor_verts, &floor_idx);
-
-            let mut meshes = vec![floor_mesh];
+            let mut meshes: Vec<Mesh> = Vec::new();
 
             let scene_opt = self
                 .scene_path
@@ -147,22 +118,40 @@ impl ApplicationHandler for App {
                                 };
                                 (vs, is)
                             } else {
-                                make_cube(node.transform.position, 0.5, color)
+                                make_box(&node.transform, color, node.tile_meters())
                             }
                         } else {
-                            make_cube(node.transform.position, 0.5, color)
+                            make_box(&node.transform, color, node.tile_meters())
                         }
                     } else {
-                        make_cube(node.transform.position, 0.5, color)
+                        make_box(&node.transform, color, node.tile_meters())
                     };
                     meshes.push(renderer.create_mesh(&vs, &is));
                 }
             } else {
+                // карта не загрузилась — простейшая заглушка, чтобы было на чём стоять
+                let floor = make_box(
+                    &Transform {
+                        position: Vec3::new(0.0, 0.0, 0.0),
+                        scale: Vec3::new(40.0, 0.2, 40.0),
+                        ..Default::default()
+                    },
+                    [0.3, 0.35, 0.3],
+                    2.0,
+                );
+                meshes.push(renderer.create_mesh(&floor.0, &floor.1));
                 for i in -2..=2 {
                     for j in -2..=2 {
                         let x = i as f32 * 4.0;
                         let z = j as f32 * 4.0;
-                        let cube = make_cube(Vec3::new(x, 0.5, z), 0.5, [0.8, 0.4, 0.2]);
+                        let cube = make_box(
+                            &Transform {
+                                position: Vec3::new(x, 0.5, z),
+                                ..Default::default()
+                            },
+                            [0.8, 0.4, 0.2],
+                            1.0,
+                        );
                         meshes.push(renderer.create_mesh(&cube.0, &cube.1));
                     }
                 }
@@ -418,7 +407,14 @@ impl ApplicationHandler for App {
                             .map(|(_, p)| p.distance(pos) > 0.001)
                             .unwrap_or(true);
                         if needs {
-                            let cube = make_cube(pos, 0.5, [0.2, 0.8, 0.2]);
+                            let cube = make_box(
+                                &Transform {
+                                    position: pos,
+                                    ..Default::default()
+                                },
+                                [0.2, 0.8, 0.2],
+                                1.0,
+                            );
                             let m = renderer.create_mesh(&cube.0, &cube.1);
                             self.entity_meshes.insert(key, (m, pos));
                         }
@@ -433,7 +429,14 @@ impl ApplicationHandler for App {
                             .map(|(_, p)| p.distance(pos) > 0.001)
                             .unwrap_or(true);
                         if needs {
-                            let cube = make_cube(pos, 0.5, [0.8, 0.2, 0.2]);
+                            let cube = make_box(
+                                &Transform {
+                                    position: pos,
+                                    ..Default::default()
+                                },
+                                [0.8, 0.2, 0.2],
+                                1.0,
+                            );
                             let m = renderer.create_mesh(&cube.0, &cube.1);
                             self.entity_meshes.insert(key, (m, pos));
                         }
@@ -448,7 +451,15 @@ impl ApplicationHandler for App {
                             .map(|(_, p)| p.distance(pos) > 0.001)
                             .unwrap_or(true);
                         if needs {
-                            let cube = make_cube(pos, 0.3, [1.0, 1.0, 0.2]);
+                            let cube = make_box(
+                                &Transform {
+                                    position: pos,
+                                    scale: Vec3::splat(0.6),
+                                    ..Default::default()
+                                },
+                                [1.0, 1.0, 0.2],
+                                1.0,
+                            );
                             let m = renderer.create_mesh(&cube.0, &cube.1);
                             self.entity_meshes.insert(key, (m, pos));
                         }
@@ -463,7 +474,15 @@ impl ApplicationHandler for App {
                             .map(|(_, p)| p.distance(pos) > 0.001)
                             .unwrap_or(true);
                         if needs {
-                            let cube = make_cube(pos, a.radius, [0.2, 0.2, 0.8]);
+                            let cube = make_box(
+                                &Transform {
+                                    position: pos,
+                                    scale: Vec3::splat(a.radius * 2.0),
+                                    ..Default::default()
+                                },
+                                [0.2, 0.2, 0.8],
+                                1.0,
+                            );
                             let m = renderer.create_mesh(&cube.0, &cube.1);
                             self.entity_meshes.insert(key, (m, pos));
                         }
@@ -510,45 +529,6 @@ impl ApplicationHandler for App {
             self.input.add_mouse_delta(delta.0 as f32, delta.1 as f32);
         }
     }
-}
-
-fn make_cube(center: Vec3, half: f32, color: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
-    let mut verts = Vec::new();
-    for &sx in &[-1.0f32, 1.0] {
-        for &sy in &[-1.0f32, 1.0] {
-            for &sz in &[-1.0f32, 1.0] {
-                let n = Vec3::new(sx, sy, sz).normalize();
-                verts.push(Vertex {
-                    position: [
-                        center.x + sx * half,
-                        center.y + sy * half,
-                        center.z + sz * half,
-                    ],
-                    normal: [n.x, n.y, n.z],
-                    color,
-                    uv: [(sx + 1.0) * 0.5, (sz + 1.0) * 0.5],
-                });
-            }
-        }
-    }
-    let faces: [[usize; 4]; 6] = [
-        [0, 2, 3, 1],
-        [4, 5, 7, 6],
-        [0, 1, 5, 4],
-        [2, 6, 7, 3],
-        [0, 4, 6, 2],
-        [1, 3, 7, 5],
-    ];
-    let mut idx = Vec::new();
-    for f in faces {
-        idx.push(f[0] as u32);
-        idx.push(f[1] as u32);
-        idx.push(f[2] as u32);
-        idx.push(f[0] as u32);
-        idx.push(f[2] as u32);
-        idx.push(f[3] as u32);
-    }
-    (verts, idx)
 }
 
 fn main() {

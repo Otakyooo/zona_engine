@@ -1,5 +1,7 @@
 //! zn-render: рендерер на wgpu (Vulkan primary, DX12/DX11 fallback).
 
+pub mod geom;
+
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
