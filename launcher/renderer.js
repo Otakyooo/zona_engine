@@ -28,7 +28,7 @@ changeDirBtn.addEventListener('click', async () => {
   }
 });
 const serverInput = document.getElementById('server');
-serverInput.value = localStorage.getItem('server') || '192.168.0.255';
+serverInput.value = localStorage.getItem('server') || '192.168.0.47';
 serverInput.addEventListener('change', () => localStorage.setItem('server', serverInput.value));
 
 channelSel.value = localStorage.getItem('channel') || 'stable';
