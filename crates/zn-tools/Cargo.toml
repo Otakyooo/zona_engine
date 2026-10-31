@@ -7,10 +7,15 @@ edition.workspace = true
 name = "zn-baker"
 path = "src/bin/baker.rs"
 
+[[bin]]
+name = "zn-gentex"
+path = "src/bin/gentex.rs"
+
 [dependencies]
 zn-core.workspace = true
 zn-scene.workspace = true
 zn-assets.workspace = true
+image.workspace = true
 egui.workspace = true
 eframe.workspace = true
 glam.workspace = true

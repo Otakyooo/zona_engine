@@ -6873,6 +6873,7 @@ dependencies = [
  "egui",
  "env_logger",
  "glam",
+ "image",
  "log",
  "ron",
  "thiserror 1.0.69",
