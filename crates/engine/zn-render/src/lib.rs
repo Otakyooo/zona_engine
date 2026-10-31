@@ -75,6 +75,15 @@ pub struct Renderer {
     default_texture: Texture,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    egui_renderer: egui_wgpu::Renderer,
+}
+
+/// Кадр интерфейса, подготовленный клиентом.
+///
+/// `FullOutput` передаётся по владению: `tessellate()` забирает `shapes`.
+pub struct UiFrame<'a> {
+    pub ctx: &'a egui::Context,
+    pub output: egui::FullOutput,
 }
 
 impl Renderer {
@@ -270,6 +279,8 @@ impl Renderer {
         });
 
         let (depth_texture, depth_view) = create_depth(&device, &config);
+        // HUD рисуется вторым проходом поверх сцены, без depth-аттачмента.
+        let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1, false);
 
         Ok(Self {
             surface,
@@ -284,6 +295,7 @@ impl Renderer {
             default_texture,
             depth_texture,
             depth_view,
+            egui_renderer,
         })
     }
 
@@ -353,6 +365,7 @@ impl Renderer {
         &mut self,
         meshes: &[(&Mesh, Option<&Texture>)],
         camera: &Camera,
+        ui: Option<UiFrame<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
         let ld = Vec3::new(0.5, 1.0, 0.3).normalize();
         let uniforms = Uniforms {
@@ -416,7 +429,61 @@ impl Renderer {
                 pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
             }
         }
-        self.queue.submit(std::iter::once(encoder.finish()));
+        // Второй проход: HUD поверх сцены. LoadOp::Load обязателен, иначе
+        // интерфейс затрёт кадр; depth не нужен — HUD плоский.
+        let mut extra_buffers: Vec<wgpu::CommandBuffer> = Vec::new();
+        if let Some(ui) = ui {
+            let ppp = ui.output.pixels_per_point.clamp(0.1, 8.0);
+            let jobs = ui.ctx.tessellate(ui.output.shapes, ppp);
+            let screen = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [self.config.width, self.config.height],
+                pixels_per_point: ppp,
+            };
+
+            for (id, delta) in &ui.output.textures_delta.set {
+                self.egui_renderer
+                    .update_texture(&self.device, &self.queue, *id, delta);
+            }
+            extra_buffers = self.egui_renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &jobs,
+                &screen,
+            );
+
+            {
+                let desc = wgpu::RenderPassDescriptor {
+                    label: Some("hud pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                };
+                // forget_lifetime отвязывает проход от энкодера; после этого
+                // любое обращение к encoder — ошибка рантайма, поэтому pass
+                // живёт строго внутри этого блока.
+                let mut pass = encoder.begin_render_pass(&desc).forget_lifetime();
+                self.egui_renderer.render(&mut pass, &jobs, &screen);
+            }
+
+            for id in &ui.output.textures_delta.free {
+                self.egui_renderer.free_texture(id);
+            }
+        }
+
+        self.queue.submit(
+            extra_buffers
+                .into_iter()
+                .chain(std::iter::once(encoder.finish())),
+        );
         output.present();
         Ok(())
     }

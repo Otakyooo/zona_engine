@@ -539,7 +539,7 @@ impl ApplicationHandler for App {
                     .map(|(m, key)| (*m, key.and_then(|k| self.textures.get(k))))
                     .collect();
                 if let Some(r) = self.renderer.as_mut() {
-                    let _ = r.render(&render_items, &self.camera);
+                    let _ = r.render(&render_items, &self.camera, None);
                 }
 
                 self.input.reset_frame();
