@@ -42,39 +42,63 @@ pub struct LoadedTexture {
     pub mip_levels: Vec<Vec<u8>>,
 }
 
+/// Строит цепочку мипмапов усреднением блоков 2x2 (box filter).
+///
+/// Диапазоны источника считаются как `x0 = x*w/nw .. (x+1)*w/nw`, поэтому
+/// нечётные размеры не теряют столбцы и не выходят за границы. Усреднение
+/// идёт в sRGB-байтах, что слегка затемняет мипы — для наших материалов
+/// это допустимо и заметно меньше, чем алиасинг nearest-neighbour.
+pub fn generate_mips(rgba: &[u8], width: u32, height: u32) -> Vec<Vec<u8>> {
+    let mut levels = Vec::new();
+    if width == 0 || height == 0 {
+        return levels;
+    }
+    levels.push(rgba.to_vec());
+
+    let mut w = width;
+    let mut h = height;
+    while w > 1 || h > 1 {
+        let prev = levels.last().expect("уровень только что добавлен");
+        let nw = (w / 2).max(1);
+        let nh = (h / 2).max(1);
+        let mut next = vec![0u8; (nw * nh * 4) as usize];
+
+        for y in 0..nh {
+            let y0 = (y * h / nh) as usize;
+            let y1 = (((y + 1) * h / nh) as usize).clamp(y0 + 1, h as usize);
+            for x in 0..nw {
+                let x0 = (x * w / nw) as usize;
+                let x1 = (((x + 1) * w / nw) as usize).clamp(x0 + 1, w as usize);
+                let mut sum = [0u32; 4];
+                let mut count = 0u32;
+                for sy in y0..y1 {
+                    for sx in x0..x1 {
+                        let idx = (sy * w as usize + sx) * 4;
+                        for (c, acc) in sum.iter_mut().enumerate() {
+                            *acc += prev[idx + c] as u32;
+                        }
+                        count += 1;
+                    }
+                }
+                let nidx = (y as usize * nw as usize + x as usize) * 4;
+                for (c, acc) in sum.iter().enumerate() {
+                    next[nidx + c] = ((acc + count / 2) / count) as u8;
+                }
+            }
+        }
+
+        levels.push(next);
+        w = nw;
+        h = nh;
+    }
+    levels
+}
+
 pub fn load_texture(path: &std::path::Path) -> Result<LoadedTexture, Box<dyn std::error::Error>> {
     let img = image::open(path)?;
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
-    let mut mip_levels = Vec::new();
-    mip_levels.push(rgba.into_raw());
-    // generate mipmaps by halving
-    let mut cur_w = w;
-    let mut cur_h = h;
-    while cur_w > 1 || cur_h > 1 {
-        let nw = (cur_w / 2).max(1);
-        let nh = (cur_h / 2).max(1);
-        // simple nearest-neighbor downscale from last level
-        let prev = mip_levels.last().unwrap();
-        let pw = cur_w as usize;
-        let ph = cur_h as usize;
-        let mut next = vec![0u8; (nw * nh * 4) as usize];
-        for y in 0..nh {
-            for x in 0..nw {
-                let sx = ((x * 2) as usize).min(pw - 1);
-                let sy = ((y * 2) as usize).min(ph - 1);
-                let idx = (sy * pw + sx) * 4;
-                let nidx = (y as usize * nw as usize + x as usize) * 4;
-                next[nidx] = prev[idx];
-                next[nidx + 1] = prev[idx + 1];
-                next[nidx + 2] = prev[idx + 2];
-                next[nidx + 3] = prev[idx + 3];
-            }
-        }
-        mip_levels.push(next);
-        cur_w = nw;
-        cur_h = nh;
-    }
+    let mip_levels = generate_mips(&rgba.into_raw(), w, h);
     Ok(LoadedTexture {
         width: w,
         height: h,
@@ -190,6 +214,55 @@ pub fn load_gltf(path: &std::path::Path) -> Result<LoadedMesh, Box<dyn std::erro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn expected_chain_len(mut w: u32, mut h: u32) -> usize {
+        let mut n = 1;
+        while w > 1 || h > 1 {
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+            n += 1;
+        }
+        n
+    }
+
+    #[test]
+    fn mip_chain_length() {
+        let square = generate_mips(&vec![128u8; 512 * 512 * 4], 512, 512);
+        assert_eq!(square.len(), 10);
+        assert_eq!(square.last().unwrap().len(), 4);
+
+        let levels = generate_mips(&vec![64u8; 100 * 60 * 4], 100, 60);
+        assert_eq!(levels.len(), expected_chain_len(100, 60));
+        assert_eq!(levels.last().unwrap().len(), 4);
+
+        let mut w = 100u32;
+        let mut h = 60u32;
+        for lvl in &levels {
+            assert_eq!(lvl.len(), (w * h * 4) as usize);
+            w = (w / 2).max(1);
+            h = (h / 2).max(1);
+        }
+    }
+
+    #[test]
+    fn mip_box_average_preserved() {
+        let px = [10u8, 20, 30, 40];
+        let mut uniform = Vec::new();
+        for _ in 0..16 {
+            uniform.extend_from_slice(&px);
+        }
+        for lvl in generate_mips(&uniform, 4, 4) {
+            assert!(lvl.chunks(4).all(|c| c == px.as_slice()));
+        }
+
+        // шахматка 2x2: среднее 127.5 округляется до 128
+        let checker = vec![
+            0u8, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0, 0, 0, 255,
+        ];
+        let levels = generate_mips(&checker, 2, 2);
+        assert_eq!(levels.len(), 2);
+        assert_eq!(levels[1], vec![128, 128, 128, 255]);
+    }
 
     #[test]
     fn cache_insert_get() {
