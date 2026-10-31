@@ -54,27 +54,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build release
         run: cargo build --workspace --release
+      - name: Stage dist
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/zn-client.exe dist/
+          Copy-Item target/release/zn-server.exe dist/
+          if (Test-Path target/release/editor.exe) { Copy-Item target/release/editor.exe dist/ }
+          if (Test-Path target/release/zn-baker.exe) { Copy-Item target/release/zn-baker.exe dist/ }
+          # Ресурсы обязательны: без них клиент рисует заглушку и белые текстуры.
+          Copy-Item -Recurse assets dist/assets
+          Copy-Item -Recurse maps dist/maps
       - name: Create manifest
         shell: pwsh
         run: |
           $tag = "${{ github.ref_name }}"
           $base = "https://github.com/Otakyooo/zona_engine/releases/download/$tag"
           $files = @()
-          Get-ChildItem target\release\*.exe | ForEach-Object {
+          Get-ChildItem dist -Recurse -File | ForEach-Object {
+            $rel = [System.IO.Path]::GetRelativePath("$PWD/dist", $_.FullName).Replace('\', '/')
+            # GitHub не принимает слэши в именах ассетов, поэтому файл в релизе
+            # плоский, а вложенный путь живёт только в поле path — лаунчер сам
+            # создаст каталоги при распаковке.
+            $asset = $_.Name
             $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
-            $files += @{ path = $_.Name; url = "$base/$($_.Name)"; sha256 = $hash; size = $_.Length }
+            $files += @{ path = $rel; url = "$base/$asset"; sha256 = $hash; size = $_.Length }
           }
-          @{ version = $tag; files = $files } | ConvertTo-Json -Depth 3 | Out-File launcher/manifest.json -Encoding utf8
-      - name: Publish launcher
-        working-directory: launcher
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm ci && npm run build -- --publish always
+          @{ version = $tag; files = $files } | ConvertTo-Json -Depth 3 | Out-File dist/manifest.json -Encoding utf8
       - name: GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            target/release/zn-client.exe
-            target/release/zn-server.exe
-            target/release/zn-editor.exe
-            launcher/manifest.json
+          files: dist/**

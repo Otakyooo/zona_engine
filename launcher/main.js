@@ -156,7 +156,9 @@ ipcMain.handle('launch-game', async (_e, opts) => {
   if (opts && opts.port) { args.push('--port', String(opts.port)); }
   if (opts && opts.token) args.push('--token', opts.token);
   if (opts && opts.scene) args.push('--scene', opts.scene);
-  const child = spawn(exe, args, { detached: true, stdio: 'ignore' });
+  // cwd обязателен: клиент ищет assets/ и maps/ рядом с собой, но часть
+  // относительных путей всё равно разрешается от рабочего каталога.
+  const child = spawn(exe, args, { detached: true, stdio: 'ignore', cwd: getGameDir() });
   child.unref();
   return { ok: true };
 });

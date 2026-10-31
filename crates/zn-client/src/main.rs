@@ -78,13 +78,25 @@ impl ApplicationHandler for App {
             // meshes
             let mut meshes: Vec<(Mesh, Option<String>)> = Vec::new();
 
-            let scene_opt = self
-                .scene_path
-                .clone()
-                .or_else(|| Some("maps/arena.ron".to_string()))
-                .and_then(|p| load_scene(std::path::Path::new(&p)).ok());
+            // Ресурсы лежат рядом с exe (так их ставит лаунчер). Раньше пути были
+            // относительными, и всё зависело от рабочего каталога лаунчера.
+            let root = asset_root();
+            let scene_opt = {
+                let requested = self
+                    .scene_path
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| root.join("maps/arena.ron"));
+                let path = if requested.is_absolute() || requested.exists() {
+                    requested
+                } else {
+                    root.join(&requested)
+                };
+                load_scene(&path).ok()
+            };
 
             if let Some(scene) = scene_opt {
+                log::info!("scene loaded: {} nodes", scene.nodes.len());
                 for node in &scene.nodes {
                     let color = node.color;
                     let (vs, is) = if let Some(mesh_path) = &node.mesh {
@@ -140,6 +152,7 @@ impl ApplicationHandler for App {
                 }
             } else {
                 // карта не загрузилась — простейшая заглушка, чтобы было на чём стоять
+                log::warn!("scene not loaded, using fallback geometry");
                 let floor = make_box(
                     &Transform {
                         position: Vec3::new(0.0, 0.0, 0.0),
@@ -185,7 +198,7 @@ impl ApplicationHandler for App {
 
             let mut textures = std::collections::HashMap::new();
             for name in ["concrete", "metal", "rust", "dirt", "grass", "wood"] {
-                let path = std::path::Path::new("assets/textures").join(format!("{name}.png"));
+                let path = root.join("assets/textures").join(format!("{name}.png"));
                 match zn_assets::load_texture(&path) {
                     Ok(lt) => {
                         textures.insert(
@@ -658,6 +671,21 @@ impl ApplicationHandler for App {
             self.input.add_mouse_delta(delta.0 as f32, delta.1 as f32);
         }
     }
+}
+
+/// Каталог с ресурсами (`assets/`, `maps/`).
+///
+/// Сначала смотрим рядом с исполняемым файлом — так игру ставит лаунчер и так
+/// ресурсы находятся независимо от рабочего каталога процесса. Если рядом
+/// ничего нет (запуск через `cargo run` из корня), отдаём текущий каталог.
+fn asset_root() -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+        && dir.join("assets").is_dir()
+    {
+        return dir.to_path_buf();
+    }
+    std::path::PathBuf::from(".")
 }
 
 fn main() {
