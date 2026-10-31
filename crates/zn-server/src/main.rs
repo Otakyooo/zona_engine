@@ -282,7 +282,7 @@ async fn main() -> anyhow::Result<()> {
             _ = tick_timer.tick() => {
                 world.tick(1.0 / 60.0);
                 // handle events
-                handle_events(&mut world, &pool).await;
+                handle_events(&mut world, &pool, &player_to_user).await;
                 snapshot_counter += 1;
                 if snapshot_counter >= 3 {
                     snapshot_counter = 0;
@@ -391,16 +391,31 @@ fn handle_consume(world: &mut SimWorld, pid: u64, item_id: u64) {
     }
 }
 
-async fn handle_events(world: &mut SimWorld, _pool: &SqlitePool) {
+async fn handle_events(
+    world: &mut SimWorld,
+    pool: &SqlitePool,
+    player_to_user: &HashMap<u64, i64>,
+) {
     let events: Vec<zn_sim::GameEvent> = std::mem::take(&mut world.events);
     for ev in events {
         match ev {
             zn_sim::GameEvent::ExtractionSuccess { player_id, .. } => {
+                // XP начисляет симуляция в `zn_sim::tick` — второй раз здесь нельзя.
+                let (uid, inv) = match (player_to_user.get(&player_id), world.get_player(player_id))
+                {
+                    (Some(uid), Some(p)) => (*uid, p.inventory.clone()),
+                    _ => continue,
+                };
+                // Сначала в БД, потом очистка: иначе вынесенный лут просто исчезает.
+                save_inventory(pool, uid, &inv).await;
                 if let Some(p) = world.get_player_mut(player_id) {
-                    p.add_xp(100);
-                    // clear inventory (extracted)
                     p.inventory = Inventory::default();
                 }
+                log::info!(
+                    "player {} extracted, {} stacks saved",
+                    player_id,
+                    inv.items.len()
+                );
             }
             zn_sim::GameEvent::PlayerDeath { player_id, .. } => {
                 // drop inventory as loot
