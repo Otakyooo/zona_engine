@@ -73,3 +73,11 @@ For a release update (only when explicitly requested by user):
 - Launcher check without a GUI session: `node --check launcher/main.js`, then `npm start` with `ELECTRON_RUN_AS_NODE` unset.
 - `launcher/manifest.stub.json` points at the local `launcher/game/zn-client.exe` (offline fallback); keep its path and sha256 in sync with the payload.
 
+## Textures
+
+- Materials live in `assets/textures/<name>.png` — 512×512, seamless, generated (concrete, metal, rust, dirt, grass, wood).
+- Regenerate with `cargo run -p zn-tools --bin zn-gentex`; output is deterministic (fixed per-material seeds).
+- Scene nodes select a material with `texture: Some("concrete")` and set texel density with `uv_scale` (metres per tile, default 1.0).
+- Build boxes with `zn_render::geom::make_box(&Transform, color, tile_m)` — 24 vertices, per-face normals, UVs measured in metres. Do not bake transforms into vertex data; pass the transform in.
+- Textures are loaded once in `resumed()` into `App::textures`; never create a texture inside the per-entity mesh rebuild path.
+
