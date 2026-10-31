@@ -4,8 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "zn-editor"
-path = "src/bin/editor.rs"
+name = "zn-baker"
+path = "src/bin/baker.rs"
 
 [dependencies]
 zn-core.workspace = true
@@ -19,5 +19,5 @@ env_logger.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 ron.workspace = true
-serde.workspace = true
 clap.workspace = true
+bincode.workspace = true

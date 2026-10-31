@@ -115,6 +115,24 @@ impl ChunkManager {
     }
 }
 
+#[derive(Clone, Debug)]
+pub enum ChunkEvent {
+    Loaded {
+        coord: ChunkCoord,
+        nodes: Vec<SceneNodeFile>,
+    },
+    Unloaded {
+        coord: ChunkCoord,
+    },
+}
+
+pub async fn load_chunk_async(coord: ChunkCoord, _chunk_size: f32) -> ChunkEvent {
+    // placeholder: return empty
+    ChunkEvent::Loaded {
+        coord,
+        nodes: Vec::new(),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
