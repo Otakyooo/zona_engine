@@ -94,8 +94,5 @@ playBtn.addEventListener('click', async () => {
 });
 
 init();
-statusEl.textContent = 'Error: ' + e.message;
-  }
-});
 
 init();

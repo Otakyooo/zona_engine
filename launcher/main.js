@@ -11,6 +11,7 @@ const { autoUpdater } = require('electron-updater');
 
 const userData = app.getPath('userData');
 const settingsFile = path.join(userData, 'settings.json');
+const defaultGameDir = path.join(userData, 'game');
 const logFile = path.join(userData, 'launcher.log');
 function log(msg) {
   try { fs.appendFileSync(logFile, new Date().toISOString() + ' ' + msg + '\n'); } catch {}
