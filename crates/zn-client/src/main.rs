@@ -15,6 +15,8 @@ use zn_render::{Camera, Mesh, Renderer, Texture, Vertex, geom::make_box};
 use zn_scene::{Transform, load_scene};
 use zn_sim::{InputCommand, Snapshot};
 
+mod hud;
+
 #[derive(Parser, Debug)]
 struct Cli {
     #[arg(long)]
@@ -43,6 +45,12 @@ struct App {
     scene_items: Vec<(Mesh, Option<String>)>,
     entity_meshes: std::collections::HashMap<u64, (Mesh, glam::Vec3, &'static str)>,
     textures: std::collections::HashMap<String, Texture>,
+    egui_ctx: egui::Context,
+    hud: hud::HudState,
+    start: Instant,
+    inventory: zn_sim::Inventory,
+    extract_elapsed: f32,
+    fps: f32,
     last_time: Option<Instant>,
     yaw: f32,
     pitch: f32,
@@ -310,6 +318,7 @@ impl ApplicationHandler for App {
                     .unwrap_or(0.016)
                     .min(0.1);
                 self.last_time = Some(now);
+                self.fps = self.fps * 0.9 + 0.1 / dt.max(1e-4);
 
                 // poll inbound
                 while let Ok(pkt) = self.net_in.try_recv() {
@@ -322,8 +331,10 @@ impl ApplicationHandler for App {
                                 log::error!("login failed: {:?}", error);
                             }
                         }
-                        ServerPacket::Profile { profile, .. } => {
+                        ServerPacket::Profile { profile, inventory } => {
                             log::info!("profile: {} level {}", profile.username, profile.level);
+                            self.inventory = inventory;
+                            self.hud.level = profile.level;
                         }
                         ServerPacket::Snapshot(snap) => {
                             // reconcile local
@@ -403,6 +414,32 @@ impl ApplicationHandler for App {
                 };
                 self.seq += 1;
                 let _ = self.net_out.send(ClientPacket::Input(cmd));
+
+                // данные HUD: всё, что уже приходит в снапшоте и профиле
+                if let Some(snap) = &self.latest_snapshot {
+                    if let Some(pid) = self.player_id
+                        && let Some(ps) = snap.players.iter().find(|p| p.id == pid)
+                    {
+                        self.hud.health = ps.health;
+                        self.hud.radiation = ps.radiation;
+                        self.hud.hunger = ps.hunger;
+                        self.hud.thirst = ps.thirst;
+                        self.hud.level = ps.level;
+                    }
+                    // Приближение: серверный таймер экстракции клиенту не передаётся.
+                    let inside = snap
+                        .extraction_zones
+                        .iter()
+                        .any(|z| (self.local_pos - z.position).length() <= z.radius);
+                    if inside {
+                        self.extract_elapsed += dt;
+                    } else {
+                        self.extract_elapsed = 0.0;
+                    }
+                    self.hud.extract = hud::extraction_progress(self.extract_elapsed);
+                }
+                self.hud.inventory = hud::format_inventory(&self.inventory);
+                self.hud.fps = self.fps;
 
                 // camera
                 let eye = self.local_pos + Vec3::new(0.0, 1.6, 0.0);
@@ -538,8 +575,39 @@ impl ApplicationHandler for App {
                     .iter()
                     .map(|(m, key)| (*m, key.and_then(|k| self.textures.get(k))))
                     .collect();
+
+                // Кадр HUD собирается до заимствования рендерера: ctx и renderer —
+                // разные поля, но так порядок очевиден.
+                let ppp = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.scale_factor() as f32)
+                    .unwrap_or(1.0)
+                    .clamp(0.1, 8.0);
+                let size = self
+                    .window
+                    .as_ref()
+                    .map(|w| w.inner_size())
+                    .unwrap_or_default();
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(size.width as f32 / ppp, size.height as f32 / ppp),
+                    )),
+                    time: Some(self.start.elapsed().as_secs_f64()),
+                    ..Default::default()
+                };
+                let hud_state = &self.hud;
+                let output = self.egui_ctx.run(raw, |ctx| {
+                    hud::draw(ctx, hud_state, Instant::now());
+                });
+
                 if let Some(r) = self.renderer.as_mut() {
-                    let _ = r.render(&render_items, &self.camera, None);
+                    let ui = zn_render::UiFrame {
+                        ctx: &self.egui_ctx,
+                        output,
+                    };
+                    let _ = r.render(&render_items, &self.camera, Some(ui));
                 }
 
                 self.input.reset_frame();
@@ -725,6 +793,12 @@ fn main() {
         scene_items: Vec::new(),
         entity_meshes: std::collections::HashMap::new(),
         textures: std::collections::HashMap::new(),
+        egui_ctx: egui::Context::default(),
+        hud: hud::HudState::default(),
+        start: Instant::now(),
+        inventory: zn_sim::Inventory::default(),
+        extract_elapsed: 0.0,
+        fps: 0.0,
         last_time: None,
         yaw: 0.0,
         pitch: 0.0,
