@@ -1,6 +1,6 @@
 {
   "name": "zona-launcher",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "ZONA launcher",
   "main": "main.js",
   "scripts": {
