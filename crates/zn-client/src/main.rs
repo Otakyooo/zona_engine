@@ -336,6 +336,9 @@ impl ApplicationHandler for App {
                             self.inventory = inventory;
                             self.hud.level = profile.level;
                         }
+                        ServerPacket::Inventory(inv) => {
+                            self.inventory = inv;
+                        }
                         ServerPacket::Snapshot(snap) => {
                             // reconcile local
                             if let Some(pid) = self.player_id
@@ -425,6 +428,7 @@ impl ApplicationHandler for App {
                         self.hud.hunger = ps.hunger;
                         self.hud.thirst = ps.thirst;
                         self.hud.level = ps.level;
+                        self.hud.xp = ps.xp;
                     }
                     // Приближение: серверный таймер экстракции клиенту не передаётся.
                     let inside = snap

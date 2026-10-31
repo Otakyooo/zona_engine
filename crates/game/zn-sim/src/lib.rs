@@ -148,6 +148,7 @@ pub struct PlayerState {
     pub yaw: f32,
     pub pitch: f32,
     pub level: i32,
+    pub xp: i64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -606,6 +607,7 @@ impl SimWorld {
                     yaw: p.yaw,
                     pitch: p.pitch,
                     level: p.level,
+                    xp: p.xp,
                 })
                 .collect(),
             anomalies: self.anomalies.clone(),

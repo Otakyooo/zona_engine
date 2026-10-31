@@ -162,11 +162,13 @@ async fn main() -> anyhow::Result<()> {
                             ClientPacket::Pickup { entity_id } => {
                                 if let Some(&pid) = addr_to_client.get(&addr) {
                                     handle_pickup(&mut world, pid, entity_id);
+                                    send_inventory(&udp.socket, &world, pid, addr).await;
                                 }
                             }
                             ClientPacket::Consume { item_id } => {
                                 if let Some(&pid) = addr_to_client.get(&addr) {
                                     handle_consume(&mut world, pid, item_id);
+                                    send_inventory(&udp.socket, &world, pid, addr).await;
                                 }
                             }
                             _ => {}
@@ -294,17 +296,31 @@ async fn main() -> anyhow::Result<()> {
                     ClientPacket::Pickup { entity_id } => {
                         let pid = conn_to_player.get(&conn_id).copied().unwrap_or(conn_id);
                         handle_pickup(&mut world, pid, entity_id);
+                        // Клиент читает только UDP, поэтому даже для TCP-запроса
+                        // ответ уходит на его UDP-адрес.
+                        if let Some(addr) = client_addrs.get(&pid).copied() {
+                            send_inventory(&udp.socket, &world, pid, addr).await;
+                        }
                     }
                     ClientPacket::Consume { item_id } => {
                         let pid = conn_to_player.get(&conn_id).copied().unwrap_or(conn_id);
                         handle_consume(&mut world, pid, item_id);
+                        if let Some(addr) = client_addrs.get(&pid).copied() {
+                            send_inventory(&udp.socket, &world, pid, addr).await;
+                        }
                     }
                 }
             }
             _ = tick_timer.tick() => {
                 world.tick(1.0 / 60.0);
                 // handle events
-                handle_events(&mut world, &pool, &player_to_user).await;
+                for (pid, inv) in handle_events(&mut world, &pool, &player_to_user).await {
+                    if let Some(addr) = client_addrs.get(&pid).copied()
+                        && let Ok(data) = zn_net::encode(&ServerPacket::Inventory(inv))
+                    {
+                        let _ = udp.socket.send_to(&data, addr).await;
+                    }
+                }
                 snapshot_counter += 1;
                 if snapshot_counter >= 3 {
                     snapshot_counter = 0;
@@ -321,6 +337,7 @@ async fn main() -> anyhow::Result<()> {
                             yaw: p.yaw,
                             pitch: p.pitch,
                             level: p.level,
+                            xp: p.xp,
                         }).collect();
                         let snap = zn_sim::Snapshot {
                             tick: world.tick,
@@ -360,6 +377,20 @@ const PICKUP_RANGE: f32 = 3.0;
 /// Допустимое расхождение между присланным origin и глазом игрока.
 const SHOT_ORIGIN_TOLERANCE: f32 = 2.0;
 const EYE_HEIGHT: f32 = 1.6;
+
+/// Отправляет игроку его текущий инвентарь по UDP.
+async fn send_inventory(
+    socket: &tokio::net::UdpSocket,
+    world: &SimWorld,
+    pid: u64,
+    addr: SocketAddr,
+) {
+    if let Some(p) = world.get_player(pid)
+        && let Ok(data) = zn_net::encode(&ServerPacket::Inventory(p.inventory.clone()))
+    {
+        let _ = socket.send_to(&data, addr).await;
+    }
+}
 
 fn handle_shot(world: &mut SimWorld, pid: u64, origin: [f32; 3], dir: [f32; 3]) -> bool {
     let eye = match world.get_player(pid) {
@@ -469,7 +500,8 @@ async fn handle_events(
     world: &mut SimWorld,
     pool: &SqlitePool,
     player_to_user: &HashMap<u64, i64>,
-) {
+) -> Vec<(u64, Inventory)> {
+    let mut changed: Vec<(u64, Inventory)> = Vec::new();
     let events: Vec<zn_sim::GameEvent> = std::mem::take(&mut world.events);
     for ev in events {
         match ev {
@@ -485,6 +517,7 @@ async fn handle_events(
                 if let Some(p) = world.get_player_mut(player_id) {
                     p.inventory = Inventory::default();
                 }
+                changed.push((player_id, Inventory::default()));
                 log::info!(
                     "player {} extracted, {} stacks saved",
                     player_id,
@@ -498,11 +531,13 @@ async fn handle_events(
                 {
                     save_profile(pool, *uid, Some(p)).await;
                     save_inventory(pool, *uid, &p.inventory).await;
+                    changed.push((player_id, p.inventory.clone()));
                 }
             }
             _ => {}
         }
     }
+    changed
 }
 
 /// Сколько неудачных попыток входа допускается с одного IP за окно.

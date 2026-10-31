@@ -54,6 +54,9 @@ pub enum ServerPacket {
     ShotResult {
         hit: Option<u64>,
     },
+    /// Новый вариант добавляется только в конец: дискриминанты bincode
+    /// позиционные, вставка в середину молча переинтерпретирует пакеты.
+    Inventory(Inventory),
 }
 
 pub fn encode<T: Serialize>(packet: &T) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -253,6 +256,20 @@ mod tests {
         let buf = read_frame(&mut cursor).await.unwrap();
         match bincode::deserialize::<ClientPacket>(&buf).unwrap() {
             ClientPacket::Consume { item_id } => assert_eq!(item_id, 7),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn inventory_packet_roundtrip() {
+        let mut inv = Inventory::default();
+        inv.add_item(1, 3);
+        let data = encode(&ServerPacket::Inventory(inv)).unwrap();
+        match bincode::deserialize::<ServerPacket>(&data[4..]).unwrap() {
+            ServerPacket::Inventory(got) => {
+                assert_eq!(got.items.len(), 1);
+                assert_eq!(got.items[0].quantity, 3);
+            }
             _ => panic!("wrong variant"),
         }
     }
