@@ -284,7 +284,9 @@ impl ApplicationHandler for App {
                     for a in &snap.artifacts {
                         let d = (a.position - pos).length();
                         if d < 2.0 && (best.is_none() || d < best.unwrap().1) {
-                            best = Some((a.id, d));
+                            // Артефакты живут в своём диапазоне id, иначе сервер
+                            // примет их за предмет инвентаря.
+                            best = Some((zn_sim::ids::ARTIFACT_BASE + a.id, d));
                         }
                     }
                     if let Some((eid, _)) = best {

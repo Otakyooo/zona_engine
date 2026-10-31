@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
         value: 10,
     });
     world.loot.push(zn_sim::LootItem {
-        id: 1,
+        id: zn_sim::ids::LOOT_BASE,
         position: Vec3::new(2.0, 0.5, 2.0),
         item: zn_sim::Item {
             id: 1,
@@ -328,9 +328,25 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn handle_shot(world: &mut SimWorld, pid: u64, origin: [f32; 3], dir: [f32; 3]) {
+/// Радиус подбора: клиент берёт с 2 м, запас на лаг.
+const PICKUP_RANGE: f32 = 3.0;
+/// Допустимое расхождение между присланным origin и глазом игрока.
+const SHOT_ORIGIN_TOLERANCE: f32 = 2.0;
+const EYE_HEIGHT: f32 = 1.6;
+
+fn handle_shot(world: &mut SimWorld, pid: u64, origin: [f32; 3], dir: [f32; 3]) -> bool {
+    let eye = match world.get_player(pid) {
+        Some(p) => p.position + Vec3::Y * EYE_HEIGHT,
+        None => return false,
+    };
     let o = Vec3::from(origin);
-    let d = Vec3::from(dir).normalize_or_zero();
+    let raw_dir = Vec3::from(dir);
+    // Клиент не должен стрелять из чужой точки и не должен присылать нулевой вектор.
+    if (o - eye).length() > SHOT_ORIGIN_TOLERANCE || raw_dir.length() < 0.1 {
+        return false;
+    }
+    let d = raw_dir.normalize();
+
     let mut best: Option<(usize, f32)> = None;
     for (i, c) in world.creatures.iter().enumerate() {
         let to_c = c.position - o;
@@ -355,28 +371,59 @@ fn handle_shot(world: &mut SimWorld, pid: u64, origin: [f32; 3], dir: [f32; 3]) 
             log::info!("creature {} killed by player {}", cid, pid);
         }
     }
+    true
 }
 
-fn handle_pickup(world: &mut SimWorld, pid: u64, entity_id: u64) {
-    if let Some(idx) = world.loot.iter().position(|l| l.id == entity_id) {
-        let item = world.loot[idx].item.clone();
-        world.loot.remove(idx);
-        if let Some(p) = world.get_player_mut(pid) {
-            p.inventory.add_item(item.id as i64, 1);
+fn handle_pickup(world: &mut SimWorld, pid: u64, entity_id: u64) -> bool {
+    let player_pos = match world.get_player(pid) {
+        Some(p) => p.position,
+        None => return false,
+    };
+    let Some(kind) = zn_sim::ids::classify(entity_id) else {
+        return false;
+    };
+
+    match kind {
+        zn_sim::ids::IdKind::Loot => {
+            let Some(idx) = world.loot.iter().position(|l| l.id == entity_id) else {
+                return false;
+            };
+            if (world.loot[idx].position - player_pos).length() > PICKUP_RANGE {
+                return false;
+            }
+            let item = world.loot.remove(idx).item;
+            if let Some(p) = world.get_player_mut(pid) {
+                p.inventory.add_item(item.id as i64, 1);
+            }
+            log::info!("player {} picked up loot {}", pid, entity_id);
+            true
         }
-        log::info!("player {} picked up loot {}", pid, entity_id);
-    }
-    if let Some(idx) = world.artifacts.iter().position(|a| a.id == entity_id) {
-        let art = world.artifacts.remove(idx);
-        if let Some(p) = world.get_player_mut(pid) {
-            p.health = (p.health + 20.0).min(p.max_health);
-            p.inventory.add_item(art.id as i64, 1);
+        zn_sim::ids::IdKind::Artifact => {
+            let artifact_id = entity_id - zn_sim::ids::ARTIFACT_BASE;
+            let Some(idx) = world.artifacts.iter().position(|a| a.id == artifact_id) else {
+                return false;
+            };
+            if (world.artifacts[idx].position - player_pos).length() > PICKUP_RANGE {
+                return false;
+            }
+            let art = world.artifacts.remove(idx);
+            if let Some(p) = world.get_player_mut(pid) {
+                p.health = (p.health + 20.0).min(p.max_health);
+                // Артефакт живёт в своём диапазоне id, иначе его съедают как аптечку.
+                p.inventory
+                    .add_item((zn_sim::ids::ARTIFACT_BASE + art.id) as i64, 1);
+            }
+            log::info!("player {} picked up artifact {}", pid, entity_id);
+            true
         }
-        log::info!("player {} picked up artifact {}", pid, entity_id);
+        _ => false,
     }
 }
 
 fn handle_consume(world: &mut SimWorld, pid: u64, item_id: u64) {
+    if item_id == 0 || item_id > zn_sim::ids::ITEM_MAX {
+        return;
+    }
     if let Some(p) = world.get_player_mut(pid) {
         let iid = item_id as i64;
         if p.inventory.has_item(iid, 1) {
@@ -623,5 +670,82 @@ async fn save_inventory(pool: &SqlitePool, user_id: i64, inv: &Inventory) {
         .bind(it.slot)
         .execute(pool)
         .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn world_with_loot() -> SimWorld {
+        let mut w = SimWorld::new();
+        w.add_player(Player::new(1, "p"));
+        w.loot.push(zn_sim::LootItem {
+            id: zn_sim::ids::LOOT_BASE,
+            position: Vec3::new(50.0, 0.5, 50.0),
+            item: zn_sim::Item {
+                id: 1,
+                name: "Medkit".into(),
+                value: 1,
+                consumable: true,
+            },
+        });
+        w
+    }
+
+    #[test]
+    fn pickup_out_of_range_rejected() {
+        let mut w = world_with_loot();
+        assert!(!handle_pickup(&mut w, 1, zn_sim::ids::LOOT_BASE));
+        assert_eq!(w.loot.len(), 1, "лут не должен исчезнуть при отказе");
+    }
+
+    #[test]
+    fn pickup_in_range_accepted() {
+        let mut w = world_with_loot();
+        w.get_player_mut(1).unwrap().position = Vec3::new(50.0, 0.8, 50.0);
+        assert!(handle_pickup(&mut w, 1, zn_sim::ids::LOOT_BASE));
+        assert!(w.loot.is_empty());
+        assert!(w.get_player(1).unwrap().inventory.has_item(1, 1));
+    }
+
+    #[test]
+    fn shot_from_far_origin_rejected() {
+        let mut w = SimWorld::new();
+        w.add_player(Player::new(1, "p"));
+        w.creatures.push(zn_sim::Creature {
+            id: 1,
+            position: Vec3::new(0.0, 0.8, 5.0),
+            health: 50.0,
+            max_health: 50.0,
+            state: zn_sim::CreatureState::Patrol,
+            target: None,
+            damage: 5.0,
+        });
+        // origin за сотни метров от игрока — выстрел не принимается
+        assert!(!handle_shot(
+            &mut w,
+            1,
+            [100.0, 100.0, 100.0],
+            [0.0, 0.0, 1.0]
+        ));
+        assert_eq!(w.creatures[0].health, 50.0);
+    }
+
+    #[test]
+    fn consume_rejects_non_item_ids() {
+        let mut w = SimWorld::new();
+        let mut p = Player::new(1, "p");
+        p.inventory.add_item(zn_sim::ids::ARTIFACT_BASE as i64, 1);
+        w.add_player(p);
+        let hp = w.get_player(1).unwrap().health;
+        handle_consume(&mut w, 1, zn_sim::ids::ARTIFACT_BASE);
+        assert_eq!(w.get_player(1).unwrap().health, hp);
+        assert!(
+            w.get_player(1)
+                .unwrap()
+                .inventory
+                .has_item(zn_sim::ids::ARTIFACT_BASE as i64, 1)
+        );
     }
 }

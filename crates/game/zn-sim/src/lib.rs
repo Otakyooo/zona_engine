@@ -643,6 +643,17 @@ mod tests {
     }
 
     #[test]
+    fn artifact_id_does_not_collide_with_medkit() {
+        use ids::{ARTIFACT_BASE, ITEM_MAX, IdKind, classify};
+        assert_eq!(classify(1), Some(IdKind::Item));
+        assert_eq!(classify(2), Some(IdKind::Item));
+        assert_eq!(classify(ARTIFACT_BASE + 1), Some(IdKind::Artifact));
+        assert_eq!(classify(ids::LOOT_BASE), Some(IdKind::Loot));
+        assert!(ARTIFACT_BASE + 1 > ITEM_MAX);
+        assert_eq!(classify(0), None);
+    }
+
+    #[test]
     fn death_loot_at_death_position() {
         let mut w = SimWorld::new();
         let mut p = Player::new(1, "p");
