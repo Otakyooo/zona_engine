@@ -6737,6 +6737,7 @@ dependencies = [
  "wgpu",
  "winit",
  "zn-assets",
+ "zn-audio",
  "zn-core",
  "zn-input",
  "zn-net",

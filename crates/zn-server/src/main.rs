@@ -161,7 +161,11 @@ async fn main() -> anyhow::Result<()> {
                             }
                             ClientPacket::Shot { origin, dir, .. } => {
                                 if let Some(&pid) = addr_to_client.get(&addr) {
-                                    handle_shot(&mut world, pid, origin, dir);
+                                    let hit = handle_shot(&mut world, pid, origin, dir);
+                                    // Ответ нужен клиенту для звука и маркера попадания.
+                                    if let Ok(d) = bincode::serialize(&ServerPacket::ShotResult { hit }) {
+                                        let _ = udp.socket.send_to(&d, addr).await;
+                                    }
                                 }
                             }
                             ClientPacket::Pickup { entity_id } => {
@@ -296,7 +300,12 @@ async fn main() -> anyhow::Result<()> {
                     }
                     ClientPacket::Shot { origin, dir, .. } => {
                         let pid = conn_to_player.get(&conn_id).copied().unwrap_or(conn_id);
-                        handle_shot(&mut world, pid, origin, dir);
+                        let hit = handle_shot(&mut world, pid, origin, dir);
+                        if let Some(addr) = client_addrs.get(&pid).copied()
+                            && let Ok(d) = bincode::serialize(&ServerPacket::ShotResult { hit })
+                        {
+                            let _ = udp.socket.send_to(&d, addr).await;
+                        }
                     }
                     ClientPacket::Pickup { entity_id } => {
                         let pid = conn_to_player.get(&conn_id).copied().unwrap_or(conn_id);
@@ -397,16 +406,17 @@ async fn send_inventory(
     }
 }
 
-fn handle_shot(world: &mut SimWorld, pid: u64, origin: [f32; 3], dir: [f32; 3]) -> bool {
-    let eye = match world.get_player(pid) {
-        Some(p) => p.position + Vec3::Y * EYE_HEIGHT,
-        None => return false,
-    };
+/// Обрабатывает выстрел. Возвращает id существа, если было попадание:
+/// по нему сервер отправит `ShotResult`, а клиент проиграет звук попадания.
+fn handle_shot(world: &mut SimWorld, pid: u64, origin: [f32; 3], dir: [f32; 3]) -> Option<u64> {
+    let eye = world
+        .get_player(pid)
+        .map(|p| p.position + Vec3::Y * EYE_HEIGHT)?;
     let o = Vec3::from(origin);
     let raw_dir = Vec3::from(dir);
     // Клиент не должен стрелять из чужой точки и не должен присылать нулевой вектор.
     if (o - eye).length() > SHOT_ORIGIN_TOLERANCE || raw_dir.length() < 0.1 {
-        return false;
+        return None;
     }
     let d = raw_dir.normalize();
 
@@ -433,8 +443,9 @@ fn handle_shot(world: &mut SimWorld, pid: u64, origin: [f32; 3], dir: [f32; 3]) 
             }
             log::info!("creature {} killed by player {}", cid, pid);
         }
+        return Some(cid);
     }
-    true
+    None
 }
 
 fn handle_pickup(world: &mut SimWorld, pid: u64, entity_id: u64) -> bool {
@@ -861,12 +872,7 @@ mod tests {
             damage: 5.0,
         });
         // origin за сотни метров от игрока — выстрел не принимается
-        assert!(!handle_shot(
-            &mut w,
-            1,
-            [100.0, 100.0, 100.0],
-            [0.0, 0.0, 1.0]
-        ));
+        assert!(handle_shot(&mut w, 1, [100.0, 100.0, 100.0], [0.0, 0.0, 1.0]).is_none());
         assert_eq!(w.creatures[0].health, 50.0);
     }
 

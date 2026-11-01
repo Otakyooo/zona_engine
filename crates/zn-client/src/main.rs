@@ -9,6 +9,7 @@ use winit::event::{DeviceEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window, WindowId};
+use zn_audio::Sfx;
 use zn_input::InputState;
 use zn_net::{ClientPacket, ServerPacket, encode};
 use zn_render::{Camera, Mesh, Renderer, Texture, Vertex, geom::make_box};
@@ -52,6 +53,9 @@ struct App {
     extract_elapsed: f32,
     fps: f32,
     net_dead: bool,
+    audio: zn_audio::AudioManager,
+    step_timer: f32,
+    last_health: f32,
     last_time: Option<Instant>,
     yaw: f32,
     pitch: f32,
@@ -266,6 +270,7 @@ impl ApplicationHandler for App {
                         client_time: 0,
                     });
                     self.seq += 1;
+                    self.audio.play(Sfx::Shot, 1.0);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -367,6 +372,13 @@ impl ApplicationHandler for App {
                             self.hud.level = profile.level;
                         }
                         ServerPacket::Inventory(inv) => {
+                            // Звук подбора — когда предметов стало больше.
+                            let before: i64 =
+                                self.inventory.items.iter().map(|i| i.quantity as i64).sum();
+                            let after: i64 = inv.items.iter().map(|i| i.quantity as i64).sum();
+                            if after > before {
+                                self.audio.play(Sfx::Pickup, 1.0);
+                            }
                             self.inventory = inv;
                         }
                         ServerPacket::Snapshot(snap) => {
@@ -393,7 +405,11 @@ impl ApplicationHandler for App {
                             }
                             self.latest_snapshot = Some(snap);
                         }
-                        ServerPacket::ShotResult { .. } => {}
+                        ServerPacket::ShotResult { hit } => {
+                            if hit.is_some() {
+                                self.audio.play(Sfx::Hit, 1.0);
+                            }
+                        }
                     }
                 }
 
@@ -436,6 +452,19 @@ impl ApplicationHandler for App {
                 self.local_pos.x = self.local_pos.x.clamp(-19.0, 19.0);
                 self.local_pos.z = self.local_pos.z.clamp(-19.0, 19.0);
 
+                // Шаги: только на земле и при движении.
+                let moving = move_vec.x.abs() + move_vec.z.abs() > 0.1;
+                let on_ground = self.local_pos.y <= 0.81;
+                if moving && on_ground {
+                    self.step_timer -= dt;
+                    if self.step_timer <= 0.0 {
+                        self.audio.play(Sfx::Step, 0.8);
+                        self.step_timer = 0.45;
+                    }
+                } else {
+                    self.step_timer = 0.0;
+                }
+
                 // send input
                 let cmd = InputCommand {
                     seq: self.seq,
@@ -453,6 +482,15 @@ impl ApplicationHandler for App {
                     if let Some(pid) = self.player_id
                         && let Some(ps) = snap.players.iter().find(|p| p.id == pid)
                     {
+                        // Урон и смерть — по падению здоровья между снапшотами.
+                        if ps.health + 0.5 < self.last_health {
+                            self.audio.play(Sfx::Hurt, 1.0);
+                        }
+                        if ps.health <= 0.0 && self.last_health > 0.0 {
+                            self.audio.play(Sfx::Death, 1.0);
+                        }
+                        self.last_health = ps.health;
+
                         self.hud.health = ps.health;
                         self.hud.radiation = ps.radiation;
                         self.hud.hunger = ps.hunger;
@@ -885,6 +923,9 @@ fn main() {
         extract_elapsed: 0.0,
         fps: 0.0,
         net_dead: false,
+        audio: zn_audio::AudioManager::new(),
+        step_timer: 0.0,
+        last_health: 100.0,
         last_time: None,
         yaw: 0.0,
         pitch: 0.0,

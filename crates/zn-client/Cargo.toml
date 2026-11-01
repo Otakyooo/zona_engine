@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 zn-core.workspace = true
 zn-render.workspace = true
+zn-audio.workspace = true
 egui.workspace = true
 uuid.workspace = true
 zn-input.workspace = true
