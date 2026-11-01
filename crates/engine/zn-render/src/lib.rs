@@ -76,6 +76,7 @@ pub struct Renderer {
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
     egui_renderer: egui_wgpu::Renderer,
+    egui_format: wgpu::TextureFormat,
 }
 
 /// Кадр интерфейса, подготовленный клиентом.
@@ -138,7 +139,14 @@ impl Renderer {
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
+            // egui пишет цвета в гамма-пространстве и на sRGB-таргете получает
+            // двойное преобразование. Держим рядом линейный view-формат: сцена
+            // рисуется в sRGB-вью, HUD — в линейный.
+            view_formats: if format.is_srgb() {
+                vec![format.remove_srgb_suffix()]
+            } else {
+                vec![]
+            },
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
@@ -280,7 +288,9 @@ impl Renderer {
 
         let (depth_texture, depth_view) = create_depth(&device, &config);
         // HUD рисуется вторым проходом поверх сцены, без depth-аттачмента.
-        let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1, false);
+        // Формат — линейный (не sRGB), иначе egui применяет гамму дважды.
+        let egui_format = config.format.remove_srgb_suffix();
+        let egui_renderer = egui_wgpu::Renderer::new(&device, egui_format, None, 1, false);
 
         Ok(Self {
             surface,
@@ -296,6 +306,7 @@ impl Renderer {
             depth_texture,
             depth_view,
             egui_renderer,
+            egui_format,
         })
     }
 
@@ -453,10 +464,16 @@ impl Renderer {
             );
 
             {
+                // Отдельный линейный вью того же таргета: сцена уже отрисована
+                // через sRGB-вью, а egui ждёт не-sRGB.
+                let hud_view = output.texture.create_view(&wgpu::TextureViewDescriptor {
+                    format: Some(self.egui_format),
+                    ..Default::default()
+                });
                 let desc = wgpu::RenderPassDescriptor {
                     label: Some("hud pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &view,
+                        view: &hud_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Load,

@@ -6733,6 +6733,7 @@ dependencies = [
  "glam",
  "log",
  "pollster",
+ "uuid",
  "wgpu",
  "winit",
  "zn-assets",

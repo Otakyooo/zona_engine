@@ -11,6 +11,7 @@ path = "src/main.rs"
 zn-core.workspace = true
 zn-render.workspace = true
 egui.workspace = true
+uuid.workspace = true
 zn-input.workspace = true
 zn-scene.workspace = true
 zn-assets.workspace = true

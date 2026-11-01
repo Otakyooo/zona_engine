@@ -351,6 +351,7 @@ impl ApplicationHandler for App {
                     };
                     match pkt {
                         ServerPacket::Welcome { id } => {
+                            log::info!("welcome: player id {id}");
                             self.player_id = Some(id);
                         }
                         ServerPacket::LoginResult { ok, error, .. } => {
@@ -688,6 +689,32 @@ fn asset_root() -> std::path::PathBuf {
     std::path::PathBuf::from(".")
 }
 
+/// Локальная учётная запись для запуска без явных кредов.
+///
+/// Лаунчер не спрашивает логин, поэтому при первом старте создаётся запись
+/// `player_<hex>` со случайным паролем и сохраняется рядом с игрой в
+/// `player.txt` (две строки). Возвращает `(логин, пароль, создана_ли_сейчас)` —
+/// флаг нужен, чтобы при первом запуске отправить Register, а дальше Login.
+fn local_account(root: &std::path::Path) -> (String, String, bool) {
+    let path = root.join("player.txt");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        let mut lines = text.lines();
+        if let (Some(u), Some(p)) = (lines.next(), lines.next()) {
+            let (u, p) = (u.trim(), p.trim());
+            if !u.is_empty() && p.len() >= 8 {
+                return (u.to_string(), p.to_string(), false);
+            }
+        }
+    }
+
+    let username = format!("player_{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+    let password = uuid::Uuid::new_v4().to_string();
+    if let Err(e) = std::fs::write(&path, format!("{username}\n{password}\n")) {
+        log::warn!("не удалось сохранить {}: {e}", path.display());
+    }
+    (username, password, true)
+}
+
 fn main() {
     // crash reporting: write panic to crash.log
     std::panic::set_hook(Box::new(|info| {
@@ -713,26 +740,30 @@ fn main() {
 
     // network thread
     let token = cli.token.clone();
-    let username = cli
+    let mut username = cli
         .username
         .clone()
         .or_else(|| std::env::var("ZONA_USERNAME").ok());
-    let password = cli
+    let mut password = cli
         .password
         .clone()
         .or_else(|| std::env::var("ZONA_PASSWORD").ok());
+    let mut register = cli.register;
+
+    // Лаунчер не передаёт учётные данные, поэтому без явных кредов заводим
+    // локальную запись рядом с игрой: иначе кнопка Play просто закрывала бы игру.
     if token.is_none() && (username.is_none() || password.is_none()) {
-        eprintln!(
-            "ZONA: нужны учётные данные.\n\
-             Укажите --token, либо --username и --password,\n\
-             либо переменные ZONA_USERNAME и ZONA_PASSWORD.\n\
-             Лаунчер передаёт токен сам."
+        let (u, p, is_new) = local_account(&asset_root());
+        log::info!(
+            "local account: {u} ({})",
+            if is_new { "created" } else { "existing" }
         );
-        std::process::exit(2);
+        username = Some(u);
+        password = Some(p);
+        register = register || is_new;
     }
     let username = username.unwrap_or_default();
     let password = password.unwrap_or_default();
-    let register = cli.register;
     let server = cli.server.clone();
     let port = cli.port;
     thread::spawn(move || {
@@ -805,14 +836,16 @@ fn main() {
         let reg = ClientPacket::Connect {
             token: token.clone(),
         };
-        if let Ok(data) = encode(&reg) {
+        // UDP-датаграмма сама имеет границы: префикс длины здесь не нужен,
+        // сервер парсит датаграмму как сырой bincode.
+        if let Ok(data) = bincode::serialize(&reg) {
             let _ = udp.send_to(&data, server_addr);
         }
 
         loop {
             // outbound
             while let Ok(pkt) = out_rx.try_recv() {
-                if let Ok(data) = encode(&pkt) {
+                if let Ok(data) = bincode::serialize(&pkt) {
                     let _ = udp.send_to(&data, server_addr);
                 }
             }

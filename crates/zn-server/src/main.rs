@@ -132,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
                                         next_id += 1;
                                         p
                                     });
+                                    log::info!("udp connect: user {uid} -> player {pid}");
                                     player_to_token.insert(pid, token.clone());
                                     let (player, profile, inventory) = spawn_player(&pool, uid, pid).await;
                                     if let std::collections::hash_map::Entry::Vacant(e) = player_to_user.entry(pid) {
@@ -143,10 +144,14 @@ async fn main() -> anyhow::Result<()> {
                                         client_addrs.insert(pid, addr);
                                     }
                                     // send Welcome + Profile via UDP
+                                    // Без префикса длины: датаграмма сама имеет границы,
+                                    // клиент парсит её как сырой bincode.
                                     let welcome = ServerPacket::Welcome { id: pid };
-                                    if let Ok(d) = zn_net::encode(&welcome) { let _ = udp.socket.send_to(&d, addr).await; }
+                                    if let Ok(d) = bincode::serialize(&welcome) { let _ = udp.socket.send_to(&d, addr).await; }
                                     let prof = ServerPacket::Profile { profile, inventory };
-                                    if let Ok(d) = zn_net::encode(&prof) { let _ = udp.socket.send_to(&d, addr).await; }
+                                    if let Ok(d) = bincode::serialize(&prof) { let _ = udp.socket.send_to(&d, addr).await; }
+                                } else {
+                                    log::warn!("udp connect: token invalid or expired");
                                 }
                             }
                             ClientPacket::Input(cmd) => {
@@ -316,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
                 // handle events
                 for (pid, inv) in handle_events(&mut world, &pool, &player_to_user).await {
                     if let Some(addr) = client_addrs.get(&pid).copied()
-                        && let Ok(data) = zn_net::encode(&ServerPacket::Inventory(inv))
+                        && let Ok(data) = bincode::serialize(&ServerPacket::Inventory(inv))
                     {
                         let _ = udp.socket.send_to(&data, addr).await;
                     }
@@ -386,7 +391,7 @@ async fn send_inventory(
     addr: SocketAddr,
 ) {
     if let Some(p) = world.get_player(pid)
-        && let Ok(data) = zn_net::encode(&ServerPacket::Inventory(p.inventory.clone()))
+        && let Ok(data) = bincode::serialize(&ServerPacket::Inventory(p.inventory.clone()))
     {
         let _ = socket.send_to(&data, addr).await;
     }
