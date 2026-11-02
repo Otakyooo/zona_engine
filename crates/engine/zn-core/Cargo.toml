@@ -7,4 +7,5 @@ edition.workspace = true
 hecs.workspace = true
 serde.workspace = true
 log.workspace = true
+env_logger.workspace = true
 thiserror.workspace = true

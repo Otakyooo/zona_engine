@@ -1,9 +1,10 @@
 //! zn-net: netcode (snapshot/delta, prediction, lag-compensation).
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
-use zn_sim::{InputCommand, Inventory, PlayerProfile, Snapshot};
+use std::time::{Duration, Instant};
+use zn_sim::{HitZone, InputCommand, Inventory, PlayerProfile, Snapshot};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientPacket {
@@ -51,8 +52,17 @@ pub enum ServerPacket {
         inventory: Inventory,
     },
     Snapshot(Snapshot),
+    /// Поля этого варианта меняются только вместе с клиентом и сервером:
+    /// bincode раскладывает вариант позиционно, и старая сборка прочитает
+    /// новый пакет как мусор.
     ShotResult {
         hit: Option<u64>,
+        /// Попадание добило цель — клиент показывает отметку в killfeed.
+        killed: bool,
+        /// Куда пришлось попадание: клиент отмечает хедшот.
+        zone: Option<HitZone>,
+        /// Урон, уже посчитанный симуляцией; клиент его только отображает.
+        damage: f32,
     },
     /// Новый вариант добавляется только в конец: дискриминанты bincode
     /// позиционные, вставка в середину молча переинтерпретирует пакеты.
@@ -118,6 +128,49 @@ where
 
 pub fn decode_client(bytes: &[u8]) -> Result<ClientPacket, Box<dyn std::error::Error>> {
     Ok(bincode::deserialize(bytes)?)
+}
+
+/// Ограничитель частоты пакетов ввода на игрока.
+///
+/// Клиент шлёт `Input` каждый кадр, поэтому лимит должен быть заметно выше
+/// частоты кадров: 120 Гц резали бы честную игру на 144/165-герцовых
+/// мониторах. 240 Гц никому не мешают и при этом срезают флуд, которым можно
+/// переписывать скорость игрока тысячи раз в секунду.
+pub struct InputRateLimiter {
+    min_interval: Duration,
+    last: HashMap<u64, Instant>,
+}
+
+impl InputRateLimiter {
+    pub const DEFAULT_RATE: u32 = 240;
+
+    pub fn new(max_per_sec: u32) -> Self {
+        let max = max_per_sec.max(1);
+        Self {
+            min_interval: Duration::from_secs_f64(1.0 / max as f64),
+            last: HashMap::new(),
+        }
+    }
+
+    /// Пропускает пакет, если с предыдущего принятого прошёл интервал.
+    ///
+    /// Метка времени обновляется только на принятом пакете: иначе серия
+    /// быстрых пакетов бесконечно сдвигала бы окно и флуд всё равно проходил.
+    /// `now` — параметр, а не `Instant::now()`: тесты сдвигают время руками.
+    pub fn allow(&mut self, player_id: u64, now: Instant) -> bool {
+        match self.last.get(&player_id) {
+            Some(prev) if now.saturating_duration_since(*prev) < self.min_interval => false,
+            _ => {
+                self.last.insert(player_id, now);
+                true
+            }
+        }
+    }
+
+    /// Забывает игрока при отключении, чтобы карта не росла вечно.
+    pub fn forget(&mut self, player_id: u64) {
+        self.last.remove(&player_id);
+    }
 }
 
 pub struct UdpEndpoint {
@@ -272,5 +325,95 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn udp_payload_is_raw_bincode_without_prefix() {
+        let pkt = ClientPacket::Input(InputCommand {
+            seq: 1,
+            yaw: 0.0,
+            pitch: 0.0,
+            move_x: 1.0,
+            move_z: 0.0,
+            dt: 0.016,
+        });
+        let udp = bincode::serialize(&pkt).unwrap();
+        let tcp = encode(&pkt).unwrap();
+
+        // Регрессия на баг, из-за которого UDP молча не работал: префикс длины
+        // принадлежит TCP-фреймингу и в датаграмме его быть не должно.
+        assert_eq!(
+            tcp.len(),
+            udp.len() + 4,
+            "TCP-кадр = префикс + сырой bincode"
+        );
+        assert_eq!(&tcp[4..], &udp[..], "префикс — единственное отличие");
+        assert!(
+            matches!(decode_client(&udp).unwrap(), ClientPacket::Input(_)),
+            "датаграмма разбирается без префикса"
+        );
+    }
+
+    #[tokio::test]
+    async fn frame_accepts_payload_at_exact_limit() {
+        let mut data = Vec::with_capacity(4 + MAX_FRAME_BYTES);
+        data.extend_from_slice(&(MAX_FRAME_BYTES as u32).to_le_bytes());
+        data.extend(std::iter::repeat_n(0u8, MAX_FRAME_BYTES));
+        let mut cursor: &[u8] = &data;
+
+        let buf = read_frame(&mut cursor)
+            .await
+            .expect("кадр ровно по лимиту должен читаться");
+        assert_eq!(buf.len(), MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    fn server_packet_inventory_keeps_variant_index() {
+        let data = bincode::serialize(&ServerPacket::Inventory(Inventory::default())).unwrap();
+        let idx = u32::from_le_bytes(data[..4].try_into().unwrap());
+        // bincode кодирует дискриминант позиционно: вставка варианта в середину
+        // enum молча переинтерпретирует старые пакеты, поэтому только в конец.
+        assert_eq!(
+            idx, 5,
+            "новые варианты ServerPacket добавляются только в конец"
+        );
+    }
+
+    #[test]
+    fn limiter_allows_first_packet() {
+        let mut lim = InputRateLimiter::new(240);
+        assert!(lim.allow(1, Instant::now()));
+    }
+
+    #[test]
+    fn limiter_drops_packet_inside_interval() {
+        let mut lim = InputRateLimiter::new(240);
+        let t0 = Instant::now();
+        assert!(lim.allow(1, t0));
+        assert!(
+            !lim.allow(1, t0 + Duration::from_millis(1)),
+            "пакет внутри окна отбрасывается"
+        );
+    }
+
+    #[test]
+    fn limiter_allows_packet_after_interval() {
+        let mut lim = InputRateLimiter::new(100);
+        let t0 = Instant::now();
+        assert!(lim.allow(1, t0));
+        assert!(
+            lim.allow(1, t0 + Duration::from_millis(11)),
+            "после истечения интервала пакет проходит"
+        );
+    }
+
+    #[test]
+    fn limiter_forget_resets_player() {
+        let mut lim = InputRateLimiter::new(1);
+        let t0 = Instant::now();
+        assert!(lim.allow(1, t0));
+        assert!(!lim.allow(1, t0), "второй пакет в том же окне отброшен");
+        lim.forget(1);
+        assert!(lim.allow(1, t0), "после forget состояние игрока сброшено");
     }
 }

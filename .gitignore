@@ -13,8 +13,10 @@ launcher/manifest.json
 .sqlx
 .DS_Store
 Thumbs.db
-.workbuddy-ai/
+.workbuddy-ai/*
+!.workbuddy-ai/memory/
 
 # локальная проверка упаковки
 dist/
 dist_test/
+logs/

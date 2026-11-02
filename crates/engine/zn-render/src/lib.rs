@@ -28,6 +28,18 @@ pub struct Texture {
     pub bind_group: wgpu::BindGroup,
 }
 
+/// Что рисовать в кадре: меш, текстура и матрица модели.
+///
+/// Статическая геометрия приходит с `Mat4::IDENTITY` — её вершины уже в мире.
+/// Подвижные сущности строятся в локальном пространстве, поэтому их трансформ
+/// передаётся здесь, а не запекается в вершины: иначе меш пришлось бы
+/// пересоздавать при каждом движении.
+pub struct RenderItem<'a> {
+    pub mesh: &'a Mesh,
+    pub texture: Option<&'a Texture>,
+    pub model: Mat4,
+}
+
 #[derive(Clone, Copy)]
 pub struct Camera {
     pub eye: Vec3,
@@ -62,6 +74,18 @@ struct Uniforms {
     _pad3: f32,
 }
 
+/// Размер матрицы модели в байтах (4×4 f32).
+const MODEL_UNIFORM_SIZE: u64 = 64;
+/// Сколько объектов можно нарисовать за кадр. Слот занимает выравнивание
+/// адаптера (обычно 256 байт), поэтому потолок держим скромным.
+const MAX_RENDER_OBJECTS: usize = 512;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct ModelUniform {
+    model: [[f32; 4]; 4],
+}
+
 pub struct Renderer {
     pub surface: wgpu::Surface<'static>,
     pub device: wgpu::Device,
@@ -72,6 +96,10 @@ pub struct Renderer {
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     texture_bgl: wgpu::BindGroupLayout,
+    model_buffer: wgpu::Buffer,
+    model_bind_group: wgpu::BindGroup,
+    /// Шаг между слотами матриц: выравнивание адаптера, но не меньше 64 байт.
+    model_stride: u64,
     default_texture: Texture,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
@@ -205,6 +233,45 @@ impl Renderer {
             }],
         });
 
+        // Матрица модели для подвижных сущностей: слот на объект, смещение
+        // выставляется динамически.
+        let model_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("model bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(MODEL_UNIFORM_SIZE),
+                },
+                count: None,
+            }],
+        });
+
+        // Шаг слота — требование wgpu: смещение динамического offset должно
+        // быть кратно выравниванию адаптера (обычно 256 байт).
+        let model_stride =
+            (device.limits().min_uniform_buffer_offset_alignment as u64).max(MODEL_UNIFORM_SIZE);
+        let model_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("model matrices"),
+            size: model_stride * MAX_RENDER_OBJECTS as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let model_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("model bg"),
+            layout: &model_bgl,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &model_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(MODEL_UNIFORM_SIZE),
+                }),
+            }],
+        });
+
         // default white texture
         let default_texture =
             create_texture_from_rgba(&device, &queue, &[255, 255, 255, 255], 1, 1, &texture_bgl);
@@ -217,7 +284,7 @@ impl Renderer {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline layout"),
-            bind_group_layouts: &[&uniform_bgl, &texture_bgl],
+            bind_group_layouts: &[&uniform_bgl, &texture_bgl, &model_bgl],
             push_constant_ranges: &[],
         });
 
@@ -302,6 +369,9 @@ impl Renderer {
             uniform_buffer,
             uniform_bind_group,
             texture_bgl,
+            model_buffer,
+            model_bind_group,
+            model_stride,
             default_texture,
             depth_texture,
             depth_view,
@@ -374,7 +444,7 @@ impl Renderer {
 
     pub fn render(
         &mut self,
-        meshes: &[(&Mesh, Option<&Texture>)],
+        items: &[RenderItem<'_>],
         camera: &Camera,
         ui: Option<UiFrame<'_>>,
     ) -> Result<(), wgpu::SurfaceError> {
@@ -393,6 +463,23 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+
+        // Все матрицы кадра — одной записью. Слоты идут с шагом выравнивания,
+        // поэтому хвост каждого слота остаётся нулевым, и это нормально.
+        let count = items.len().min(MAX_RENDER_OBJECTS);
+        if count > 0 {
+            let stride = self.model_stride as usize;
+            let mut data = vec![0u8; stride * count];
+            for (i, item) in items.iter().take(count).enumerate() {
+                let m = ModelUniform {
+                    model: item.model.to_cols_array_2d(),
+                };
+                let start = i * stride;
+                data[start..start + MODEL_UNIFORM_SIZE as usize]
+                    .copy_from_slice(bytemuck::bytes_of(&m));
+            }
+            self.queue.write_buffer(&self.model_buffer, 0, &data);
+        }
 
         let output = self.surface.get_current_texture()?;
         let view = output
@@ -432,12 +519,14 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            for (mesh, tex) in meshes {
-                let t = tex.unwrap_or(&self.default_texture);
+            for (i, item) in items.iter().take(count).enumerate() {
+                let t = item.texture.unwrap_or(&self.default_texture);
                 pass.set_bind_group(1, &t.bind_group, &[]);
-                pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
-                pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.num_indices, 0, 0..1);
+                let offset = (i as u64 * self.model_stride) as u32;
+                pass.set_bind_group(2, &self.model_bind_group, &[offset]);
+                pass.set_vertex_buffer(0, item.mesh.vertex_buffer.slice(..));
+                pass.set_index_buffer(item.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..item.mesh.num_indices, 0, 0..1);
             }
         }
         // Второй проход: HUD поверх сцены. LoadOp::Load обязателен, иначе
@@ -693,6 +782,9 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(1) @binding(0) var t_diffuse: texture_2d<f32>;
 @group(1) @binding(1) var s_diffuse: sampler;
+// Матрица модели приходит слотом из общего буфера: трансформ живёт в uniform,
+// а не в вершинах, поэтому меш переиспользуется всеми экземплярами.
+@group(2) @binding(0) var<uniform> model: mat4x4<f32>;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
@@ -711,11 +803,12 @@ struct VertexOut {
 @vertex
 fn vs_main(in: VertexIn) -> VertexOut {
     var out: VertexOut;
-    out.clip_position = u.view_proj * vec4<f32>(in.position, 1.0);
+    let world = model * vec4<f32>(in.position, 1.0);
+    out.clip_position = u.view_proj * world;
     out.color = in.color;
-    out.normal = in.normal;
+    out.normal = (model * vec4<f32>(in.normal, 0.0)).xyz;
     out.uv = in.uv;
-    out.world_pos = in.position;
+    out.world_pos = world.xyz;
     return out;
 }
 

@@ -113,7 +113,11 @@ ipcMain.handle('download-update', async (e, manifest) => {
     ensureDir(path.dirname(dest));
     // download
     let buf;
-    if (f.url && f.url.startsWith('file://')) {
+    if (f.url && f.url.startsWith('local:')) {
+      // Офлайн-payload: путь относительный к каталогу лаунчера, поэтому
+      // манифест переносим между машинами (раньше здесь был абсолютный file:///).
+      buf = fs.readFileSync(path.join(__dirname, f.url.slice('local:'.length)));
+    } else if (f.url && f.url.startsWith('file://')) {
       const filePath = decodeURIComponent(f.url.replace('file:///', '').replace('file://', ''));
       buf = fs.readFileSync(filePath);
     } else if (f.url) {

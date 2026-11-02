@@ -1,4 +1,6 @@
-//! zn-core: ECS-слой поверх hecs, шедулер, fixed timestep, event bus.
+//! zn-core: ECS-слой поверх hecs, шедулер, fixed timestep, event bus, логи.
+
+pub mod logging;
 
 use hecs::World;
 use std::time::Duration;

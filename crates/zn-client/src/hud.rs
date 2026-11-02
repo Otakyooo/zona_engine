@@ -177,7 +177,8 @@ pub fn format_inventory(inv: &zn_sim::Inventory) -> String {
     format!("INV: {}", parts.join("   "))
 }
 
-fn item_name(id: i64) -> String {
+/// Имя предмета по id. Общее для HUD и панели инвентаря.
+pub(crate) fn item_name(id: i64) -> String {
     match id {
         1 => "Medkit".into(),
         2 => "Bandage".into(),

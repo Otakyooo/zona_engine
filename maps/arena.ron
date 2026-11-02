@@ -109,4 +109,30 @@
             uv_scale: 1.0,
         ),
     ],
+    // Границы: пол 50×50, стены центр ±25 с толщиной 1 — внутренняя грань ±24.5.
+    bounds: (min: (-24.0, 0.0, -24.0), max: (24.0, 20.0, 24.0)),
+    players: [
+        (position: (0.0, 0.8, -20.0), yaw: 0.0),
+        (position: (-18.0, 0.8, 18.0), yaw: 2.35),
+    ],
+    creature_spawns: [
+        (id: 3000001, position: (10.0, 0.8, 10.0), kind: "snork", health: 50.0, damage: 5.0, respawn_secs: 45.0),
+        (id: 3000002, position: (-12.0, 0.8, -8.0), kind: "dog", health: 35.0, damage: 3.0, respawn_secs: 30.0),
+        (id: 3000003, position: (-14.0, 0.8, 12.0), kind: "snork", health: 60.0, damage: 6.0, respawn_secs: 60.0),
+    ],
+    loot: [
+        (id: 1000000, position: (2.0, 0.5, 2.0), item: (id: 1, name: "Medkit", value: 50, consumable: true)),
+        (id: 1000001, position: (-6.0, 0.5, 4.0), item: (id: 2, name: "Bandage", value: 15, consumable: true)),
+        (id: 1000002, position: (8.0, 0.5, -9.0), item: (id: 2, name: "Bandage", value: 15, consumable: true)),
+    ],
+    anomalies: [
+        (id: 1, position: (5.0, 0.0, 5.0), radius: 3.0, damage: 5.0, radiation: 10.0),
+        (id: 2, position: (-16.0, 0.0, 16.0), radius: 3.5, damage: 7.0, radiation: 14.0),
+    ],
+    artifacts: [
+        (id: 1, position: (5.0, 0.5, 5.0), effect: "regen", value: 10),
+    ],
+    extractions: [
+        (id: 1, position: (18.0, 0.0, 18.0), radius: 3.0),
+    ],
 )

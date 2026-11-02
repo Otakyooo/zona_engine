@@ -1,8 +1,11 @@
 use eframe::egui;
-use zn_scene::{SceneFile, SceneNodeFile, Transform, load_scene, save_scene};
+use zn_content::ZoneMap;
+use zn_scene::{SceneNodeFile, Transform};
 
 struct EditorApp {
-    nodes: Vec<SceneNodeFile>,
+    /// Редактор держит карту целиком, а не только `nodes`: сохранение
+    /// `SceneFile` молча стирало бы спавны, лут и аномалии из файла.
+    zone: ZoneMap,
     selected: Option<usize>,
     scene_path: String,
     status: String,
@@ -11,10 +14,38 @@ struct EditorApp {
 impl EditorApp {
     fn new() -> Self {
         Self {
-            nodes: Vec::new(),
+            zone: ZoneMap::default(),
             selected: None,
-            scene_path: "scene.ron".to_string(),
+            scene_path: "maps/arena.ron".to_string(),
             status: String::new(),
+        }
+    }
+
+    fn save(&mut self) {
+        let problems = self.zone.validate();
+        if !problems.is_empty() {
+            let first = problems
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.status = format!("не сохранено, карта невалидна: {first}");
+            return;
+        }
+        match self.zone.save(std::path::Path::new(&self.scene_path)) {
+            Ok(_) => self.status = format!("saved {}", self.scene_path),
+            Err(e) => self.status = format!("save err: {e}"),
+        }
+    }
+
+    fn load(&mut self) {
+        match ZoneMap::load(std::path::Path::new(&self.scene_path)) {
+            Ok(zone) => {
+                self.zone = zone;
+                self.selected = None;
+                self.status = format!("loaded {}", self.scene_path);
+            }
+            Err(e) => self.status = format!("load err: {e}"),
         }
     }
 }
@@ -24,8 +55,8 @@ impl eframe::App for EditorApp {
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Add Cube").clicked() {
-                    self.nodes.push(SceneNodeFile {
-                        name: format!("cube_{}", self.nodes.len()),
+                    self.zone.nodes.push(SceneNodeFile {
+                        name: format!("cube_{}", self.zone.nodes.len()),
                         transform: Transform::default(),
                         mesh: None,
                         color: [0.8, 0.4, 0.2],
@@ -34,22 +65,10 @@ impl eframe::App for EditorApp {
                     });
                 }
                 if ui.button("Save").clicked() {
-                    let scene = SceneFile {
-                        nodes: self.nodes.clone(),
-                    };
-                    match save_scene(std::path::Path::new(&self.scene_path), &scene) {
-                        Ok(_) => self.status = format!("saved {}", self.scene_path),
-                        Err(e) => self.status = format!("save err: {}", e),
-                    }
+                    self.save();
                 }
                 if ui.button("Load").clicked() {
-                    match load_scene(std::path::Path::new(&self.scene_path)) {
-                        Ok(s) => {
-                            self.nodes = s.nodes;
-                            self.status = format!("loaded {}", self.scene_path);
-                        }
-                        Err(e) => self.status = format!("load err: {}", e),
-                    }
+                    self.load();
                 }
                 if ui.button("Play").clicked() {
                     let _ = std::process::Command::new("cargo")
@@ -62,17 +81,33 @@ impl eframe::App for EditorApp {
         });
         egui::SidePanel::left("hierarchy").show(ctx, |ui| {
             ui.label("Hierarchy");
-            for (i, n) in self.nodes.iter().enumerate() {
+            for (i, n) in self.zone.nodes.iter().enumerate() {
                 let sel = self.selected == Some(i);
                 if ui.selectable_label(sel, &n.name).clicked() {
                     self.selected = Some(i);
                 }
             }
+            ui.separator();
+            ui.label(format!(
+                "спавны: {} игрок / {} существ",
+                self.zone.players.len(),
+                self.zone.creature_spawns.len()
+            ));
+            ui.label(format!(
+                "лут: {}, аномалии: {}, эвакуация: {}",
+                self.zone.loot.len(),
+                self.zone.anomalies.len(),
+                self.zone.extractions.len()
+            ));
+            ui.label(format!(
+                "bounds: {:?} .. {:?}",
+                self.zone.bounds.min, self.zone.bounds.max
+            ));
         });
         egui::SidePanel::right("inspector").show(ctx, |ui| {
             ui.label("Inspector");
             if let Some(i) = self.selected {
-                if let Some(node) = self.nodes.get_mut(i) {
+                if let Some(node) = self.zone.nodes.get_mut(i) {
                     ui.label(&node.name);
                     ui.horizontal(|ui| {
                         ui.label("x");

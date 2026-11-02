@@ -5,8 +5,9 @@ edition.workspace = true
 
 [dependencies]
 zn-sim.workspace = true
+zn-scene.workspace = true
+glam.workspace = true
 serde.workspace = true
 ron.workspace = true
 log.workspace = true
 thiserror.workspace = true
-anyhow.workspace = true

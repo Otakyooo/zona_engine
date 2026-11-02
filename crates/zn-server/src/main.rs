@@ -13,17 +13,20 @@ struct Cli {
     bind: String,
     #[arg(long, default_value_t = 7777)]
     port: u16,
+    /// Карта зоны: геометрия плюс спавны, лут и аномалии.
+    #[arg(long, default_value = "maps/arena.ron")]
+    map: String,
 }
 use glam::Vec3;
 use tokio::net::{TcpListener, tcp::OwnedWriteHalf};
 use tokio::sync::Mutex;
 use tokio::time::interval;
-use zn_net::{ClientPacket, ServerPacket, UdpEndpoint, send_packet};
+use zn_net::{ClientPacket, InputRateLimiter, ServerPacket, UdpEndpoint, send_packet};
 use zn_sim::{Inventory, InventoryItem, Player, PlayerProfile, SimWorld};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    zn_core::logging::init("zn-server");
     let cli = Cli::parse();
     let db_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:zona.db?mode=rwc".into());
     let pool = SqlitePool::connect(&db_url).await?;
@@ -34,45 +37,22 @@ async fn main() -> anyhow::Result<()> {
     let udp = Arc::new(udp);
     log::info!("zn-server listening TCP {}, UDP {}", cli.port, cli.port + 1);
 
+    // Карта — источник истины: существа, лут и аномалии живут в файле, а не
+    // в коде сервера. Невалидная карта падает на старте, а не у игрока в игре.
+    let map_path = std::path::PathBuf::from(&cli.map);
+    let zone = zn_content::ZoneMap::load(&map_path)?;
+    log::info!(
+        "карта {}: {} узлов, {} существ, {} лута, {} аномалий",
+        map_path.display(),
+        zone.nodes.len(),
+        zone.creature_spawns.len(),
+        zone.loot.len(),
+        zone.anomalies.len(),
+    );
     let mut world = SimWorld::new();
-    // M4: spawn sample entities
-    world.anomalies.push(zn_sim::Anomaly {
-        id: 1,
-        position: Vec3::new(5.0, 0.0, 5.0),
-        radius: 3.0,
-        damage: 5.0,
-        radiation: 10.0,
-    });
-    world.artifacts.push(zn_sim::Artifact {
-        id: 1,
-        position: Vec3::new(5.0, 0.5, 5.0),
-        effect: "regen".into(),
-        value: 10,
-    });
-    world.loot.push(zn_sim::LootItem {
-        id: zn_sim::ids::LOOT_BASE,
-        position: Vec3::new(2.0, 0.5, 2.0),
-        item: zn_sim::Item {
-            id: 1,
-            name: "Medkit".into(),
-            value: 50,
-            consumable: true,
-        },
-    });
-    world.creatures.push(zn_sim::Creature {
-        id: 1,
-        position: Vec3::new(10.0, 0.8, 10.0),
-        health: 50.0,
-        max_health: 50.0,
-        state: zn_sim::CreatureState::Patrol,
-        target: None,
-        damage: 5.0,
-    });
-    world.extraction_zones.push(zn_sim::ExtractionZone {
-        id: 1,
-        position: Vec3::new(18.0, 0.0, 18.0),
-        radius: 3.0,
-    });
+    zone.apply_to(&mut world);
+    // Статические боксы для рейкаста: считаются один раз при загрузке карты.
+    let obstacles = zone.obstacles();
     let mut writers: HashMap<u64, Arc<Mutex<OwnedWriteHalf>>> = HashMap::new();
     let mut token_to_player: HashMap<String, u64> = HashMap::new();
     let mut player_to_token: HashMap<u64, String> = HashMap::new();
@@ -83,11 +63,13 @@ async fn main() -> anyhow::Result<()> {
     let mut addr_to_client: HashMap<SocketAddr, u64> = HashMap::new();
     let mut next_id: u64 = 1;
     let mut login_attempts: HashMap<IpAddr, Attempts> = HashMap::new();
+    let mut input_limiter = InputRateLimiter::new(InputRateLimiter::DEFAULT_RATE);
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<(u64, ClientPacket)>(1024);
 
     let mut tick_timer = interval(Duration::from_millis(1000 / 60));
     let mut save_timer = interval(Duration::from_secs(60));
     let mut session_sweep = interval(Duration::from_secs(600));
+    let mut stats_timer = interval(Duration::from_secs(10));
     let mut snapshot_counter: u32 = 0;
 
     let mut udp_buf = vec![0u8; 65535];
@@ -134,7 +116,8 @@ async fn main() -> anyhow::Result<()> {
                                     });
                                     log::info!("udp connect: user {uid} -> player {pid}");
                                     player_to_token.insert(pid, token.clone());
-                                    let (player, profile, inventory) = spawn_player(&pool, uid, pid).await;
+                                    let (player, profile, inventory) =
+                                        spawn_player(&pool, uid, pid, world.player_spawn).await;
                                     if let std::collections::hash_map::Entry::Vacant(e) = player_to_user.entry(pid) {
                                         e.insert(uid);
                                         world.add_player(player);
@@ -155,15 +138,24 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             ClientPacket::Input(cmd) => {
-                                if let Some(&pid) = addr_to_client.get(&addr) {
+                                if let Some(&pid) = addr_to_client.get(&addr)
+                                    && input_limiter.allow(pid, Instant::now())
+                                {
                                     world.apply_input(pid, &cmd);
                                 }
                             }
                             ClientPacket::Shot { origin, dir, .. } => {
                                 if let Some(&pid) = addr_to_client.get(&addr) {
-                                    let hit = handle_shot(&mut world, pid, origin, dir);
+                                    let outcome =
+                                        handle_shot(&mut world, &obstacles, pid, origin, dir);
+                                    let reply = ServerPacket::ShotResult {
+                                        hit: outcome.and_then(|o| o.hit),
+                                        killed: outcome.map(|o| o.killed).unwrap_or(false),
+                                        zone: outcome.and_then(|o| o.zone),
+                                        damage: outcome.map(|o| o.damage).unwrap_or(0.0),
+                                    };
                                     // Ответ нужен клиенту для звука и маркера попадания.
-                                    if let Ok(d) = bincode::serialize(&ServerPacket::ShotResult { hit }) {
+                                    if let Ok(d) = bincode::serialize(&reply) {
                                         let _ = udp.socket.send_to(&d, addr).await;
                                     }
                                 }
@@ -195,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
                                     save_inventory(&pool, uid, &world.get_player(pid).map(|p| p.inventory.clone()).unwrap_or_default()).await;
                                 }
                                 world.remove_player(pid);
+                                input_limiter.forget(pid);
                                 player_to_user.remove(&pid);
                                 token_to_player.retain(|_, v| *v != pid);
                                 if let Some(token) = player_to_token.remove(&pid) {
@@ -276,7 +269,8 @@ async fn main() -> anyhow::Result<()> {
                                 p
                             });
                             player_to_token.insert(pid, token.clone());
-                            let (player, profile, inventory) = spawn_player(&pool, uid, pid).await;
+                            let (player, profile, inventory) =
+                                spawn_player(&pool, uid, pid, world.player_spawn).await;
                             if let std::collections::hash_map::Entry::Vacant(e) = player_to_user.entry(pid) {
                                 e.insert(uid);
                                 world.add_player(player);
@@ -296,13 +290,21 @@ async fn main() -> anyhow::Result<()> {
                     }
                     ClientPacket::Input(cmd) => {
                         let pid = conn_to_player.get(&conn_id).copied().unwrap_or(conn_id);
-                        world.apply_input(pid, &cmd);
+                        if input_limiter.allow(pid, Instant::now()) {
+                            world.apply_input(pid, &cmd);
+                        }
                     }
                     ClientPacket::Shot { origin, dir, .. } => {
                         let pid = conn_to_player.get(&conn_id).copied().unwrap_or(conn_id);
-                        let hit = handle_shot(&mut world, pid, origin, dir);
+                        let outcome = handle_shot(&mut world, &obstacles, pid, origin, dir);
+                        let reply = ServerPacket::ShotResult {
+                            hit: outcome.and_then(|o| o.hit),
+                            killed: outcome.map(|o| o.killed).unwrap_or(false),
+                            zone: outcome.and_then(|o| o.zone),
+                            damage: outcome.map(|o| o.damage).unwrap_or(0.0),
+                        };
                         if let Some(addr) = client_addrs.get(&pid).copied()
-                            && let Ok(d) = bincode::serialize(&ServerPacket::ShotResult { hit })
+                            && let Ok(d) = bincode::serialize(&reply)
                         {
                             let _ = udp.socket.send_to(&d, addr).await;
                         }
@@ -369,6 +371,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
+            _ = stats_timer.tick() => {
+                let m = world.metrics();
+                log::info!(
+                    "[tick] tick={} players={} creatures={} loot={} events={}",
+                    m.tick,
+                    m.players,
+                    m.creatures,
+                    m.loot,
+                    m.pending_events
+                );
+            }
             _ = session_sweep.tick() => {
                 let _ = sqlx::query("DELETE FROM sessions WHERE expires_at < datetime('now')")
                     .execute(&pool)
@@ -388,9 +401,6 @@ async fn main() -> anyhow::Result<()> {
 
 /// Радиус подбора: клиент берёт с 2 м, запас на лаг.
 const PICKUP_RANGE: f32 = 3.0;
-/// Допустимое расхождение между присланным origin и глазом игрока.
-const SHOT_ORIGIN_TOLERANCE: f32 = 2.0;
-const EYE_HEIGHT: f32 = 1.6;
 
 /// Отправляет игроку его текущий инвентарь по UDP.
 async fn send_inventory(
@@ -406,46 +416,34 @@ async fn send_inventory(
     }
 }
 
-/// Обрабатывает выстрел. Возвращает id существа, если было попадание:
-/// по нему сервер отправит `ShotResult`, а клиент проиграет звук попадания.
-fn handle_shot(world: &mut SimWorld, pid: u64, origin: [f32; 3], dir: [f32; 3]) -> Option<u64> {
-    let eye = world
-        .get_player(pid)
-        .map(|p| p.position + Vec3::Y * EYE_HEIGHT)?;
-    let o = Vec3::from(origin);
-    let raw_dir = Vec3::from(dir);
-    // Клиент не должен стрелять из чужой точки и не должен присылать нулевой вектор.
-    if (o - eye).length() > SHOT_ORIGIN_TOLERANCE || raw_dir.length() < 0.1 {
+/// Передаёт выстрел в симуляцию и пишет в лог факт убийства.
+///
+/// Никакой арифметики урона здесь нет: хитбоксы, дистанция, стены, XP и
+/// смерть живут в `zn_sim::SimWorld::apply_shot`.
+fn handle_shot(
+    world: &mut SimWorld,
+    obstacles: &[zn_sim::Aabb],
+    pid: u64,
+    origin: [f32; 3],
+    dir: [f32; 3],
+) -> Option<zn_sim::ShotOutcome> {
+    let Some(outcome) = world.apply_shot(pid, Vec3::from(origin), Vec3::from(dir), obstacles)
+    else {
+        // Отказ значит, что клиент стреляет из чужой точки или шлёт мусор.
+        // Пишем в лог: это же основа для разбора инцидентов и античита.
+        log::warn!("shot rejected from player {pid}: origin={origin:?} dir={dir:?}");
         return None;
+    };
+    log::debug!(
+        "player {pid} shot {:?} in {:?} for {:.0} damage",
+        outcome.hit,
+        outcome.zone,
+        outcome.damage
+    );
+    if outcome.killed {
+        log::info!("player {pid} killed {:?} ({:?})", outcome.hit, outcome.zone);
     }
-    let d = raw_dir.normalize();
-
-    let mut best: Option<(usize, f32)> = None;
-    for (i, c) in world.creatures.iter().enumerate() {
-        let to_c = c.position - o;
-        let t = to_c.dot(d);
-        if t < 0.0 {
-            continue;
-        }
-        let closest = o + d * t;
-        let dist = (closest - c.position).length();
-        if dist <= 1.0 && (best.is_none() || t < best.unwrap().1) {
-            best = Some((i, t));
-        }
-    }
-    if let Some((i, _)) = best {
-        let cid = world.creatures[i].id;
-        world.creatures[i].health -= 20.0;
-        if world.creatures[i].health <= 0.0 {
-            world.creatures.remove(i);
-            if let Some(p) = world.get_player_mut(pid) {
-                p.add_xp(50);
-            }
-            log::info!("creature {} killed by player {}", cid, pid);
-        }
-        return Some(cid);
-    }
-    None
+    Some(outcome)
 }
 
 fn handle_pickup(world: &mut SimWorld, pid: u64, entity_id: u64) -> bool {
@@ -726,13 +724,23 @@ async fn load_profile(pool: &SqlitePool, user_id: i64) -> Option<PlayerProfile> 
 /// Профиль и инвентарь читаются один раз: раньше оба пути подключения грузили
 /// их дважды, а `level`/`xp`/`currency` вообще не переносились в `Player`,
 /// из-за чего первое же сохранение обнуляло прогресс.
-async fn spawn_player(pool: &SqlitePool, uid: i64, pid: u64) -> (Player, PlayerProfile, Inventory) {
+async fn spawn_player(
+    pool: &SqlitePool,
+    uid: i64,
+    pid: u64,
+    spawn: Vec3,
+) -> (Player, PlayerProfile, Inventory) {
     let profile = load_profile(pool, uid)
         .await
         .unwrap_or_else(|| PlayerProfile::new(uid, "player"));
     let inventory = load_inventory(pool, uid).await;
     let mut player = Player::new(pid, profile.username.clone());
     player.apply_profile(&profile);
+    // Новичок приходит с нулевой позицией из дефолтного профиля — ставим его
+    // на точку спавна карты. Сохранённая позиция игрока не перетирается.
+    if player.position == Vec3::ZERO {
+        player.position = spawn;
+    }
     player.inventory = inventory.clone();
     (player, profile, inventory)
 }
@@ -870,9 +878,10 @@ mod tests {
             state: zn_sim::CreatureState::Patrol,
             target: None,
             damage: 5.0,
+            kind: "test".into(),
         });
         // origin за сотни метров от игрока — выстрел не принимается
-        assert!(handle_shot(&mut w, 1, [100.0, 100.0, 100.0], [0.0, 0.0, 1.0]).is_none());
+        assert!(handle_shot(&mut w, &[], 1, [100.0, 100.0, 100.0], [0.0, 0.0, 1.0]).is_none());
         assert_eq!(w.creatures[0].health, 50.0);
     }
 

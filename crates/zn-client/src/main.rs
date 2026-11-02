@@ -1,5 +1,5 @@
 use clap::Parser;
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -12,11 +12,16 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use zn_audio::Sfx;
 use zn_input::InputState;
 use zn_net::{ClientPacket, ServerPacket, encode};
-use zn_render::{Camera, Mesh, Renderer, Texture, Vertex, geom::make_box};
-use zn_scene::{Transform, load_scene};
-use zn_sim::{InputCommand, Snapshot};
+use zn_render::{
+    Camera, Mesh, RenderItem, Renderer, Texture, Vertex,
+    geom::{self, make_box},
+};
+use zn_scene::Transform;
+use zn_sim::{InputCommand, Snapshot, interpolate, lerp_angle};
 
 mod hud;
+mod perf;
+mod ui;
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -38,13 +43,91 @@ struct Cli {
     port: u16,
 }
 
+/// Сглаживание чужих сущностей между снапшотами.
+///
+/// Сервер присылает позиции 20 раз в секунду, а кадров больше: без
+/// интерполяции движение выглядит рывками раз в три тика. Рисуем с задержкой
+/// на один интервал — `alpha` идёт от предыдущего снапшота (0) к текущему (1).
+#[derive(Default)]
+struct RemoteInterp {
+    prev_players: std::collections::HashMap<u64, (Vec3, f32)>,
+    players: std::collections::HashMap<u64, (Vec3, f32)>,
+    prev_creatures: std::collections::HashMap<u64, Vec3>,
+    creatures: std::collections::HashMap<u64, Vec3>,
+    /// Когда пришёл последний снапшот.
+    at: Option<Instant>,
+    /// Измеренный интервал между снапшотами, секунды.
+    interval: f32,
+}
+
+impl RemoteInterp {
+    /// Начальное значение до первого измерения: 20 Гц — текущая частота сервера.
+    const DEFAULT_INTERVAL: f32 = 1.0 / 20.0;
+
+    fn push(
+        &mut self,
+        players: &[zn_sim::PlayerState],
+        creatures: &[zn_sim::Creature],
+        now: Instant,
+    ) {
+        self.prev_players = std::mem::take(&mut self.players);
+        self.prev_creatures = std::mem::take(&mut self.creatures);
+        for p in players {
+            self.players.insert(p.id, (p.position, p.yaw));
+        }
+        for c in creatures {
+            self.creatures.insert(c.id, c.position);
+        }
+        match self.at {
+            Some(at) => {
+                let dt = now.saturating_duration_since(at).as_secs_f32();
+                if dt > 0.0 {
+                    // Сглаживание интервала: одиночный лаг сети не должен
+                    // растягивать сглаживание на полсекунды.
+                    self.interval = (self.interval * 0.8 + dt * 0.2).clamp(0.02, 0.2);
+                }
+            }
+            None => self.interval = Self::DEFAULT_INTERVAL,
+        }
+        self.at = Some(now);
+    }
+
+    fn alpha(&self, now: Instant) -> f32 {
+        match self.at {
+            Some(at) if self.interval > 0.0 => {
+                (now.saturating_duration_since(at).as_secs_f32() / self.interval).clamp(0.0, 1.0)
+            }
+            _ => 1.0,
+        }
+    }
+
+    fn player(&self, id: u64, alpha: f32) -> Option<(Vec3, f32)> {
+        let (pos, yaw) = *self.players.get(&id)?;
+        let (prev_pos, prev_yaw) = self.prev_players.get(&id).copied().unwrap_or((pos, yaw));
+        Some((
+            interpolate(prev_pos, pos, alpha, zn_sim::INTERP_MAX_JUMP),
+            lerp_angle(prev_yaw, yaw, alpha),
+        ))
+    }
+
+    fn creature(&self, id: u64, alpha: f32) -> Option<Vec3> {
+        let cur = *self.creatures.get(&id)?;
+        let prev = self.prev_creatures.get(&id).copied().unwrap_or(cur);
+        Some(interpolate(prev, cur, alpha, zn_sim::INTERP_MAX_JUMP))
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     input: InputState,
     camera: Camera,
     scene_items: Vec<(Mesh, Option<String>)>,
-    entity_meshes: std::collections::HashMap<u64, (Mesh, glam::Vec3, &'static str)>,
+    /// Меш на сущность строится один раз; в кадре двигается только модель.
+    entity_meshes: std::collections::HashMap<u64, (Mesh, &'static str)>,
+    /// Грубый уровень детализации: один бокс вместо силуэта.
+    player_lod: Option<Mesh>,
+    creature_lod: Option<Mesh>,
     textures: std::collections::HashMap<String, Texture>,
     egui_ctx: egui::Context,
     hud: hud::HudState,
@@ -52,6 +135,7 @@ struct App {
     inventory: zn_sim::Inventory,
     extract_elapsed: f32,
     fps: f32,
+    perf: perf::PerfStats,
     net_dead: bool,
     audio: zn_audio::AudioManager,
     step_timer: f32,
@@ -62,6 +146,12 @@ struct App {
     vertical_velocity: f32,
     cursor_captured: bool,
     scene_path: Option<String>,
+    /// Экран — состояние, а не флаг: от него зависит и ввод, и отрисовка.
+    screen: ui::Screen,
+    /// Переводит события winit в события egui. Без него кнопки не нажимаются.
+    egui_state: Option<egui_winit::State>,
+    show_inventory: bool,
+    interp: RemoteInterp,
 
     // networking
     net_out: Sender<ClientPacket>,
@@ -96,11 +186,16 @@ impl ApplicationHandler for App {
                 } else {
                     root.join(&requested)
                 };
-                load_scene(&path).ok()
+                zn_content::ZoneMap::load(&path).ok()
             };
 
             if let Some(scene) = scene_opt {
-                log::info!("scene loaded: {} nodes", scene.nodes.len());
+                log::info!(
+                    "карта загружена: {} узлов, {} существ, {} лута",
+                    scene.nodes.len(),
+                    scene.creature_spawns.len(),
+                    scene.loot.len()
+                );
                 for node in &scene.nodes {
                     let color = node.color;
                     let (vs, is) = if let Some(mesh_path) = &node.mesh {
@@ -214,23 +309,49 @@ impl ApplicationHandler for App {
                 }
             }
 
-            let _ = window.set_cursor_grab(CursorGrabMode::Locked);
-            window.set_cursor_visible(false);
+            // Грубый LOD: меш строится один раз, размер приходит матрицей модели.
+            let (pv, pi) = geom::unit_box([0.2, 0.8, 0.2], 1.0);
+            self.player_lod = Some(renderer.create_mesh(&pv, &pi));
+            let (cv, ci) = geom::unit_box([0.8, 0.2, 0.2], 1.0);
+            self.creature_lod = Some(renderer.create_mesh(&cv, &ci));
+
+            // Стартуем в меню: курсор свободен, игровой ввод не захвачен.
+            let _ = window.set_cursor_grab(CursorGrabMode::None);
+            window.set_cursor_visible(true);
+            self.egui_state = Some(egui_winit::State::new(
+                self.egui_ctx.clone(),
+                egui::ViewportId::ROOT,
+                window.as_ref(),
+                Some(window.scale_factor() as f32),
+                None,
+                None,
+            ));
 
             self.window = Some(window);
             self.renderer = Some(renderer);
             self.input = InputState::new();
-            self.input.cursor_captured = true;
+            self.input.cursor_captured = false;
             self.camera = camera;
             self.scene_items = meshes;
             self.textures = textures;
             self.last_time = Some(Instant::now());
-            self.cursor_captured = true;
+            self.cursor_captured = false;
             self.local_pos = Vec3::new(0.0, 0.8, 0.0);
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // egui получает событие первым: кнопки меню должны нажиматься, а не
+        // превращаться в выстрел.
+        if let Some(state) = self.egui_state.as_mut()
+            && let Some(window) = self.window.as_ref()
+        {
+            let _ = state.on_window_event(window.as_ref(), &event);
+        }
+        // В меню и на экране смерти мышь не стреляет.
+        if self.screen != ui::Screen::Playing && matches!(&event, WindowEvent::MouseInput { .. }) {
+            return;
+        }
         match &event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -246,12 +367,7 @@ impl ApplicationHandler for App {
                     && *button == winit::event::MouseButton::Left
                     && *state == winit::event::ElementState::Pressed
                 {
-                    self.cursor_captured = true;
-                    self.input.cursor_captured = true;
-                    if let Some(w) = self.window.as_ref() {
-                        let _ = w.set_cursor_grab(CursorGrabMode::Locked);
-                        w.set_cursor_visible(false);
-                    }
+                    self.capture_cursor();
                 }
                 if *state == winit::event::ElementState::Pressed
                     && *button == winit::event::MouseButton::Left
@@ -275,25 +391,24 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.input.handle_key_event(event);
+                if self.screen != ui::Screen::Playing {
+                    return;
+                }
                 use winit::keyboard::PhysicalKey;
                 if event.state == winit::event::ElementState::Pressed
                     && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
                 {
                     if self.cursor_captured {
-                        self.cursor_captured = false;
-                        self.input.cursor_captured = false;
-                        if let Some(w) = self.window.as_ref() {
-                            let _ = w.set_cursor_grab(CursorGrabMode::None);
-                            w.set_cursor_visible(true);
-                        }
+                        self.release_cursor();
                     } else {
-                        self.cursor_captured = true;
-                        self.input.cursor_captured = true;
-                        if let Some(w) = self.window.as_ref() {
-                            let _ = w.set_cursor_grab(CursorGrabMode::Locked);
-                            w.set_cursor_visible(false);
-                        }
+                        self.capture_cursor();
                     }
+                }
+                // Tab: панель инвентаря поверх HUD.
+                if event.state == winit::event::ElementState::Pressed
+                    && let PhysicalKey::Code(KeyCode::Tab) = event.physical_key
+                {
+                    self.show_inventory = !self.show_inventory;
                 }
                 // E: pickup
                 if event.state == winit::event::ElementState::Pressed
@@ -331,6 +446,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
+                self.perf.begin_frame(now);
                 let dt = self
                     .last_time
                     .map(|t| (now - t).as_secs_f32())
@@ -402,12 +518,42 @@ impl ApplicationHandler for App {
                                     self.yaw = yaw;
                                     self.pitch = pitch;
                                 }
+                                // Смерть ловим по снапшоту: сервер уже
+                                // респавнит игрока, поэтому без экрана игрок
+                                // не заметил бы, что погиб.
+                                if ps.health <= 0.0 && self.screen == ui::Screen::Playing {
+                                    self.screen = ui::Screen::Dead;
+                                    self.release_cursor();
+                                }
                             }
+                            // Копии позиций для сглаживания: `snap` уезжает в
+                            // `latest_snapshot`, а предыдущие значения нужны в кадре.
+                            self.interp
+                                .push(&snap.players, &snap.creatures, Instant::now());
                             self.latest_snapshot = Some(snap);
                         }
-                        ServerPacket::ShotResult { hit } => {
+                        ServerPacket::ShotResult {
+                            hit,
+                            killed,
+                            zone,
+                            damage,
+                        } => {
                             if hit.is_some() {
                                 self.audio.play(Sfx::Hit, 1.0);
+                            }
+                            let head = zone == Some(zn_sim::HitZone::Head);
+                            if head {
+                                self.hud
+                                    .toasts
+                                    .push((format!("хедшот — {damage:.0} урона"), Instant::now()));
+                            }
+                            if killed {
+                                let text = if head {
+                                    "цель уничтожена в голову"
+                                } else {
+                                    "цель уничтожена"
+                                };
+                                self.hud.toasts.push((text.into(), Instant::now()));
                             }
                         }
                     }
@@ -428,7 +574,13 @@ impl ApplicationHandler for App {
                 }
 
                 // movement (simplified, matching server)
-                let move_vec = self.input.movement_vector();
+                // В меню и на экране смерти игрок стоит: нулевой вектор уходит
+                // на сервер, поэтому предсказание и сервер не расходятся.
+                let move_vec = if self.screen == ui::Screen::Playing {
+                    self.input.movement_vector()
+                } else {
+                    Default::default()
+                };
                 let forward = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin());
                 let right = Vec3::new(forward.z, 0.0, -forward.x);
                 let mut vel = forward * (-move_vec.z) + right * move_vec.x;
@@ -527,155 +679,189 @@ impl ApplicationHandler for App {
                 self.camera.eye = eye;
                 self.camera.target = eye + dir;
 
-                // render remote players as cubes (rebuilt each frame? optimize: reuse meshes; simple: append to meshes list is not ideal)
-                // We'll render base meshes only; remote players drawn by adding temporary meshes to a separate list.
-                let mut render_list: Vec<(&Mesh, Option<&str>)> = self
+                // Статика уже в мировых координатах, поэтому identity-модель.
+                let mut render_list: Vec<(&Mesh, Option<&str>, Mat4)> = self
                     .scene_items
                     .iter()
-                    .map(|(m, key)| (m, key.as_deref()))
+                    .map(|(m, key)| (m, key.as_deref(), Mat4::IDENTITY))
                     .collect();
 
-                // build remote player meshes on the fly (cheap enough for M3)
-                let mut entity_keys: Vec<u64> = Vec::new();
-                let mut keep_keys: std::collections::HashSet<u64> =
-                    std::collections::HashSet::new();
+                // Два прохода. Первый создаёт меши (по одному на сущность) и
+                // чистит исчезнувшие: вставлять в карту нельзя, пока список
+                // отрисовки держит ссылки на её меши. Второй только читает и
+                // собирает матрицы моделей, поэтому в кадре меши не пересоздаются.
                 if let Some(snap) = &self.latest_snapshot
                     && let Some(pid) = self.player_id
                 {
                     let renderer = self.renderer.as_ref().unwrap();
+                    let mut keep: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
                     for ps in &snap.players {
                         if ps.id == pid {
                             continue;
                         }
-                        let key = ps.id;
-                        let pos = ps.position + Vec3::new(0.0, 0.5, 0.0);
-                        let needs = self
-                            .entity_meshes
-                            .get(&key)
-                            .map(|(_, p, _)| p.distance(pos) > 0.001)
-                            .unwrap_or(true);
-                        if needs {
-                            let cube = make_box(
-                                &Transform {
-                                    position: pos,
-                                    ..Default::default()
-                                },
-                                [0.2, 0.8, 0.2],
-                                1.0,
-                            );
-                            let m = renderer.create_mesh(&cube.0, &cube.1);
-                            self.entity_meshes.insert(key, (m, pos, "metal"));
+                        keep.insert(ps.id);
+                        if !self.entity_meshes.contains_key(&ps.id) {
+                            let started = Instant::now();
+                            let (vs, is) = geom::humanoid_local([0.25, 0.65, 0.25], 1.0);
+                            let m = renderer.create_mesh(&vs, &is);
+                            self.perf.mesh_rebuild(started.elapsed());
+                            self.entity_meshes.insert(ps.id, (m, "metal"));
                         }
-                        entity_keys.push(key);
                     }
                     for c in &snap.creatures {
                         let key = c.id + 1_000_000;
-                        let pos = c.position + Vec3::new(0.0, 0.5, 0.0);
-                        let needs = self
-                            .entity_meshes
-                            .get(&key)
-                            .map(|(_, p, _)| p.distance(pos) > 0.001)
-                            .unwrap_or(true);
-                        if needs {
-                            let cube = make_box(
-                                &Transform {
-                                    position: pos,
-                                    ..Default::default()
-                                },
-                                [0.8, 0.2, 0.2],
-                                1.0,
-                            );
-                            let m = renderer.create_mesh(&cube.0, &cube.1);
-                            self.entity_meshes.insert(key, (m, pos, "rust"));
+                        keep.insert(key);
+                        if !self.entity_meshes.contains_key(&key) {
+                            let started = Instant::now();
+                            let (vs, is) = geom::quadruped_local([0.75, 0.25, 0.2], 1.0);
+                            let m = renderer.create_mesh(&vs, &is);
+                            self.perf.mesh_rebuild(started.elapsed());
+                            self.entity_meshes.insert(key, (m, "rust"));
                         }
-                        entity_keys.push(key);
                     }
                     for l in &snap.loot {
                         let key = l.id + 2_000_000;
-                        let pos = l.position;
-                        let needs = self
-                            .entity_meshes
-                            .get(&key)
-                            .map(|(_, p, _)| p.distance(pos) > 0.001)
-                            .unwrap_or(true);
-                        if needs {
-                            let cube = make_box(
-                                &Transform {
-                                    position: pos,
-                                    scale: Vec3::splat(0.6),
-                                    ..Default::default()
-                                },
-                                [1.0, 1.0, 0.2],
-                                1.0,
-                            );
-                            let m = renderer.create_mesh(&cube.0, &cube.1);
-                            self.entity_meshes.insert(key, (m, pos, "wood"));
+                        keep.insert(key);
+                        if !self.entity_meshes.contains_key(&key) {
+                            let started = Instant::now();
+                            let (vs, is) = geom::unit_box([1.0, 1.0, 0.2], 1.0);
+                            let m = renderer.create_mesh(&vs, &is);
+                            self.perf.mesh_rebuild(started.elapsed());
+                            self.entity_meshes.insert(key, (m, "wood"));
                         }
-                        entity_keys.push(key);
                     }
                     for a in &snap.anomalies {
                         let key = a.id + 3_000_000;
-                        let pos = a.position;
-                        let needs = self
-                            .entity_meshes
-                            .get(&key)
-                            .map(|(_, p, _)| p.distance(pos) > 0.001)
-                            .unwrap_or(true);
-                        if needs {
-                            let cube = make_box(
-                                &Transform {
-                                    position: pos,
-                                    scale: Vec3::splat(a.radius * 2.0),
-                                    ..Default::default()
-                                },
-                                [0.2, 0.2, 0.8],
-                                1.0,
-                            );
-                            let m = renderer.create_mesh(&cube.0, &cube.1);
-                            self.entity_meshes.insert(key, (m, pos, "concrete"));
+                        keep.insert(key);
+                        if !self.entity_meshes.contains_key(&key) {
+                            let started = Instant::now();
+                            let (vs, is) = geom::unit_box([0.2, 0.2, 0.8], 1.0);
+                            let m = renderer.create_mesh(&vs, &is);
+                            self.perf.mesh_rebuild(started.elapsed());
+                            self.entity_meshes.insert(key, (m, "concrete"));
                         }
-                        entity_keys.push(key);
                     }
-                }
-                for key in &entity_keys {
-                    keep_keys.insert(*key);
-                }
-                self.entity_meshes.retain(|k, _| keep_keys.contains(k));
-                for key in &entity_keys {
-                    if let Some((m, _, material)) = self.entity_meshes.get(key) {
-                        render_list.push((m, Some(*material)));
-                    }
-                }
+                    self.entity_meshes.retain(|k, _| keep.contains(k));
 
-                let render_items: Vec<(&Mesh, Option<&Texture>)> = render_list
+                    // alpha: 0 — предыдущий снапшот, 1 — текущий.
+                    let alpha = self.interp.alpha(now);
+
+                    for ps in &snap.players {
+                        if ps.id == pid {
+                            continue;
+                        }
+                        let (pos, yaw_rad) = self
+                            .interp
+                            .player(ps.id, alpha)
+                            .unwrap_or((ps.position, ps.yaw));
+                        let yaw = glam::Quat::from_rotation_y(yaw_rad);
+                        let far =
+                            zn_scene::select_lod((pos - self.local_pos).length(), &[25.0]) > 0;
+                        let chosen = if far {
+                            self.player_lod.as_ref().map(|m| (m, "metal"))
+                        } else {
+                            self.entity_meshes.get(&ps.id).map(|(m, mat)| (m, *mat))
+                        };
+                        if let Some((mesh, material)) = chosen {
+                            let model = if far {
+                                Mat4::from_scale_rotation_translation(
+                                    Vec3::new(0.6, 1.8, 0.6),
+                                    yaw,
+                                    pos + Vec3::Y * 0.9,
+                                )
+                            } else {
+                                Mat4::from_rotation_translation(yaw, pos)
+                            };
+                            render_list.push((mesh, Some(material), model));
+                        }
+                    }
+                    for c in &snap.creatures {
+                        let key = c.id + 1_000_000;
+                        let pos = self.interp.creature(c.id, alpha).unwrap_or(c.position);
+                        let far =
+                            zn_scene::select_lod((pos - self.local_pos).length(), &[30.0]) > 0;
+                        let chosen = if far {
+                            self.creature_lod.as_ref().map(|m| (m, "rust"))
+                        } else {
+                            self.entity_meshes.get(&key).map(|(m, mat)| (m, *mat))
+                        };
+                        if let Some((mesh, material)) = chosen {
+                            let model = if far {
+                                Mat4::from_scale_rotation_translation(
+                                    Vec3::new(0.8, 1.2, 0.8),
+                                    glam::Quat::IDENTITY,
+                                    pos + Vec3::Y * 0.6,
+                                )
+                            } else {
+                                Mat4::from_translation(pos)
+                            };
+                            render_list.push((mesh, Some(material), model));
+                        }
+                    }
+                    for l in &snap.loot {
+                        let key = l.id + 2_000_000;
+                        if let Some((m, material)) = self.entity_meshes.get(&key) {
+                            render_list.push((
+                                m,
+                                Some(*material),
+                                Mat4::from_scale_rotation_translation(
+                                    Vec3::splat(0.6),
+                                    glam::Quat::IDENTITY,
+                                    l.position,
+                                ),
+                            ));
+                        }
+                    }
+                    for a in &snap.anomalies {
+                        let key = a.id + 3_000_000;
+                        if let Some((m, material)) = self.entity_meshes.get(&key) {
+                            render_list.push((
+                                m,
+                                Some(*material),
+                                Mat4::from_scale_rotation_translation(
+                                    Vec3::splat(a.radius * 2.0),
+                                    glam::Quat::IDENTITY,
+                                    a.position,
+                                ),
+                            ));
+                        }
+                    }
+                }
+                let render_items: Vec<RenderItem> = render_list
                     .iter()
-                    .map(|(m, key)| (*m, key.and_then(|k| self.textures.get(k))))
+                    .map(|(m, key, model)| RenderItem {
+                        mesh: m,
+                        texture: key.and_then(|k| self.textures.get(k)),
+                        model: *model,
+                    })
                     .collect();
 
-                // Кадр HUD собирается до заимствования рендерера: ctx и renderer —
-                // разные поля, но так порядок очевиден.
-                let ppp = self
-                    .window
-                    .as_ref()
-                    .map(|w| w.scale_factor() as f32)
-                    .unwrap_or(1.0)
-                    .clamp(0.1, 8.0);
-                let size = self
-                    .window
-                    .as_ref()
-                    .map(|w| w.inner_size())
-                    .unwrap_or_default();
-                let raw = egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(size.width as f32 / ppp, size.height as f32 / ppp),
-                    )),
-                    time: Some(self.start.elapsed().as_secs_f64()),
-                    ..Default::default()
+                // Ввод интерфейса идёт через egui-winit: без него кнопки не
+                // получали бы клики, а клик по меню уходил бы в выстрел.
+                let mut raw = match (self.egui_state.as_mut(), self.window.as_ref()) {
+                    (Some(state), Some(window)) => state.take_egui_input(window.as_ref()),
+                    _ => egui::RawInput::default(),
                 };
+                raw.time = Some(self.start.elapsed().as_secs_f64());
+
+                let screen = self.screen;
+                let mut action = ui::Action::None;
                 let hud_state = &self.hud;
+                let inventory = &self.inventory;
+                let show_inventory = self.show_inventory;
                 let output = self.egui_ctx.run(raw, |ctx| {
-                    hud::draw(ctx, hud_state, Instant::now());
+                    action = match screen {
+                        ui::Screen::Menu => ui::menu(ctx),
+                        ui::Screen::Dead => ui::dead(ctx, hud_state.xp, hud_state.level),
+                        ui::Screen::Playing => {
+                            hud::draw(ctx, hud_state, Instant::now());
+                            if show_inventory {
+                                ui::inventory(ctx, inventory);
+                            }
+                            ui::Action::None
+                        }
+                    };
                 });
 
                 if let Some(r) = self.renderer.as_mut() {
@@ -684,6 +870,23 @@ impl ApplicationHandler for App {
                         output,
                     };
                     let _ = r.render(&render_items, &self.camera, Some(ui));
+                }
+
+                self.perf.end_frame(render_items.len());
+                if let Some(line) = self.perf.take_report(Instant::now()) {
+                    log::info!("[perf] {line}");
+                }
+
+                // Действие меню применяется после кадра: до этого момента
+                // render_items держит ссылки на меши и текстуры, и захват
+                // курсора через &mut self с ними бы конфликтовал.
+                match action {
+                    ui::Action::StartRaid => {
+                        self.screen = ui::Screen::Playing;
+                        self.capture_cursor();
+                    }
+                    ui::Action::Quit => event_loop.exit(),
+                    ui::Action::None => {}
                 }
 
                 self.input.reset_frame();
@@ -708,6 +911,27 @@ impl ApplicationHandler for App {
             && self.cursor_captured
         {
             self.input.add_mouse_delta(delta.0 as f32, delta.1 as f32);
+        }
+    }
+}
+
+impl App {
+    /// Захват курсора — только по явному действию игрока (меню или клик).
+    fn capture_cursor(&mut self) {
+        self.cursor_captured = true;
+        self.input.cursor_captured = true;
+        if let Some(w) = self.window.as_ref() {
+            let _ = w.set_cursor_grab(CursorGrabMode::Locked);
+            w.set_cursor_visible(false);
+        }
+    }
+
+    fn release_cursor(&mut self) {
+        self.cursor_captured = false;
+        self.input.cursor_captured = false;
+        if let Some(w) = self.window.as_ref() {
+            let _ = w.set_cursor_grab(CursorGrabMode::None);
+            w.set_cursor_visible(true);
         }
     }
 }
@@ -767,7 +991,7 @@ fn main() {
         eprintln!("{}", msg);
     }));
 
-    env_logger::init();
+    zn_core::logging::init("zn-client");
     let cli = Cli::parse();
     if cli.telemetry {
         log::info!("telemetry: session_start");
@@ -915,6 +1139,8 @@ fn main() {
         },
         scene_items: Vec::new(),
         entity_meshes: std::collections::HashMap::new(),
+        player_lod: None,
+        creature_lod: None,
         textures: std::collections::HashMap::new(),
         egui_ctx: egui::Context::default(),
         hud: hud::HudState::default(),
@@ -922,6 +1148,7 @@ fn main() {
         inventory: zn_sim::Inventory::default(),
         extract_elapsed: 0.0,
         fps: 0.0,
+        perf: perf::PerfStats::new(),
         net_dead: false,
         audio: zn_audio::AudioManager::new(),
         step_timer: 0.0,
@@ -932,6 +1159,10 @@ fn main() {
         vertical_velocity: 0.0,
         cursor_captured: false,
         scene_path: cli.scene,
+        screen: ui::Screen::Menu,
+        egui_state: None,
+        show_inventory: false,
+        interp: RemoteInterp::default(),
         net_out: out_tx,
         net_in: in_rx,
         player_id: None,

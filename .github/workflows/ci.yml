@@ -14,6 +14,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Versions
+        run: node ci/check-versions.js
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy

@@ -14,6 +14,8 @@ path = "src/bin/gentex.rs"
 [dependencies]
 zn-core.workspace = true
 zn-scene.workspace = true
+zn-content.workspace = true
+zn-sim.workspace = true
 zn-assets.workspace = true
 image.workspace = true
 egui.workspace = true

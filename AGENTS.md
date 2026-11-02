@@ -67,11 +67,24 @@ For a release update (only when explicitly requested by user):
 
 - Root: `C:\Users\russi\WorkBuddy AI\Zona_games` (path contains a space — quote it in shell commands).
 - Migrated from `E:\zona_engine` on 2026-10-31 via local clone; the old copy is kept as a backup.
-- Durable agent notes live in `.workbuddy-ai/memory/` (git-ignored).
-- Do not set a global `CARGO_TARGET_DIR`: `ci/installer.iss` and CI expect the relative `target/` directory.
+- Durable agent notes live in `.workbuddy-ai/memory/` (tracked in git).
+- Old release artifacts and closed plans are archived under `.workbuddy-ai/archive/` and `.kilo/plans/archive/`.
+- Do not set a global `CARGO_TARGET_DIR`: CI expects the relative `target/` directory.
+- Product version has one source: `[workspace.package] version` in the root `Cargo.toml`. `node ci/check-versions.js` fails when `launcher/package.json`, `manifest.stub.json` or the release tag disagree; regenerate the offline manifest with `npm run stub` in `launcher/` after replacing the payload.
 - Verify after every change: `cargo fmt --all -- --check`, `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`.
 - Launcher check without a GUI session: `node --check launcher/main.js`, then `npm start` with `ELECTRON_RUN_AS_NODE` unset.
 - `launcher/manifest.stub.json` points at the local `launcher/game/zn-client.exe` (offline fallback); keep its path and sha256 in sync with the payload.
+
+## Memory (for agents)
+
+Project memory lives in `.workbuddy-ai/memory/` and is tracked in git. It is the only durable context between sessions — read it before starting work, write to it before finishing.
+
+- Start of a task: read `MEMORY.md` (index) and `OPEN.md` (priorities).
+- An architectural decision that is not obvious from the code goes to `DECISIONS.md` (numbered, with context and consequences).
+- A trap that cost time goes to `PITFALLS.md` as symptom → cause → fix. The cause is mandatory: without it the rule becomes superstition.
+- End of a task: append to `journal/<YYYY-MM-DD>.md` — what changed, why, which checks ran, and concrete numbers (tests, FPS, sizes). Link commit hashes.
+- `MEMORY.md` stays an index of at most ~150 lines. When it grows, push detail into `PITFALLS.md`, `DECISIONS.md` or the journal — do not let it become a wall of text.
+- Do not duplicate what the code or `README.md` already says. Memory records the non-obvious.
 
 ## Textures
 
