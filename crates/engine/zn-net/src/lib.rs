@@ -4,7 +4,147 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
-use zn_sim::{HitZone, InputCommand, Inventory, PlayerProfile, Snapshot};
+use zn_sim::{
+    Aabb, Anomaly, Artifact, Bounds, Creature, HitZone, InputCommand, Inventory, InventoryItem,
+    LootItem, PlayerProfile, PlayerState, Snapshot,
+};
+
+/// Версия игрового протокола.
+///
+/// Bincode не несёт имён полей: клиент другой сборки либо не разберёт пакет,
+/// либо, что хуже, разберёт его как мусор. Версия едет в `Welcome`, и клиент
+/// обязан сказать об этом вслух, а не искать баг в движении.
+pub const PROTOCOL_VERSION: u16 = 7;
+
+/// Дельта снапшота: только изменившиеся сущности и списки удалённых.
+///
+/// Клиент применяет её к своему последнему кадру; `base_tick` обязан совпасть.
+/// Сервер хранит историю кадров, поэтому потеря дельты не ломает состояние:
+/// следующая считается от того же подтверждённого тика и содержит накопления.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SnapshotDelta {
+    pub base_tick: u64,
+    pub tick: u64,
+    pub players: Vec<PlayerState>,
+    pub removed_players: Vec<u64>,
+    pub anomalies: Vec<Anomaly>,
+    pub removed_anomalies: Vec<u64>,
+    pub artifacts: Vec<Artifact>,
+    pub removed_artifacts: Vec<u64>,
+    pub loot: Vec<LootItem>,
+    pub removed_loot: Vec<u64>,
+    pub creatures: Vec<Creature>,
+    pub removed_creatures: Vec<u64>,
+}
+
+fn collect_updates<T: Clone + PartialEq>(
+    base: &[T],
+    current: &[T],
+    id: impl Fn(&T) -> u64,
+) -> (Vec<T>, Vec<u64>) {
+    let mut updates = Vec::new();
+    for item in current {
+        match base.iter().find(|old| id(old) == id(item)) {
+            Some(old) if old == item => {}
+            _ => updates.push(item.clone()),
+        }
+    }
+    let mut removed: Vec<u64> = Vec::new();
+    for old in base {
+        if !current.iter().any(|item| id(item) == id(old)) {
+            removed.push(id(old));
+        }
+    }
+    removed.sort_unstable();
+    (updates, removed)
+}
+
+fn apply_updates<T: Clone>(
+    target: &mut Vec<T>,
+    updates: &[T],
+    removed: &[u64],
+    id: impl Fn(&T) -> u64,
+) {
+    target.retain(|item| !removed.contains(&id(item)));
+    for update in updates {
+        if let Some(pos) = target.iter().position(|item| id(item) == id(update)) {
+            target[pos] = update.clone();
+        } else {
+            target.push(update.clone());
+        }
+    }
+}
+
+impl SnapshotDelta {
+    /// Сравнивает два полных кадра и оставляет только различия.
+    pub fn between(base: &Snapshot, current: &Snapshot) -> Self {
+        let (players, removed_players) = collect_updates(&base.players, &current.players, |p| p.id);
+        let (anomalies, removed_anomalies) =
+            collect_updates(&base.anomalies, &current.anomalies, |a| a.id);
+        let (artifacts, removed_artifacts) =
+            collect_updates(&base.artifacts, &current.artifacts, |a| a.id);
+        let (loot, removed_loot) = collect_updates(&base.loot, &current.loot, |l| l.id);
+        let (creatures, removed_creatures) =
+            collect_updates(&base.creatures, &current.creatures, |c| c.id);
+        Self {
+            base_tick: base.tick,
+            tick: current.tick,
+            players,
+            removed_players,
+            anomalies,
+            removed_anomalies,
+            artifacts,
+            removed_artifacts,
+            loot,
+            removed_loot,
+            creatures,
+            removed_creatures,
+        }
+    }
+
+    /// Применяет дельту к последнему полному кадру клиента.
+    pub fn apply(&self, snapshot: &mut Snapshot) {
+        apply_updates(
+            &mut snapshot.players,
+            &self.players,
+            &self.removed_players,
+            |p| p.id,
+        );
+        apply_updates(
+            &mut snapshot.anomalies,
+            &self.anomalies,
+            &self.removed_anomalies,
+            |a| a.id,
+        );
+        apply_updates(
+            &mut snapshot.artifacts,
+            &self.artifacts,
+            &self.removed_artifacts,
+            |a| a.id,
+        );
+        apply_updates(&mut snapshot.loot, &self.loot, &self.removed_loot, |l| l.id);
+        apply_updates(
+            &mut snapshot.creatures,
+            &self.creatures,
+            &self.removed_creatures,
+            |c| c.id,
+        );
+        snapshot.tick = self.tick;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.players.is_empty()
+            && self.removed_players.is_empty()
+            && self.anomalies.is_empty()
+            && self.removed_anomalies.is_empty()
+            && self.artifacts.is_empty()
+            && self.removed_artifacts.is_empty()
+            && self.loot.is_empty()
+            && self.removed_loot.is_empty()
+            && self.creatures.is_empty()
+            && self.removed_creatures.is_empty()
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientPacket {
@@ -35,12 +175,59 @@ pub enum ClientPacket {
     Consume {
         item_id: u64,
     },
+    /// Проверка живости канала и замер RTT. UDP-сокет не даёт события
+    /// «соединение закрыто», поэтому живность подтверждается явно.
+    Ping {
+        nonce: u64,
+    },
+    /// Выбор оружия из каталога. Сервер проверяет id и присылает `Loadout`.
+    SetLoadout {
+        weapon_id: u64,
+    },
+    /// Забрать предмет из схрона в рейдовый инвентарь.
+    TakeFromStash {
+        item_id: u64,
+        quantity: u32,
+    },
+    /// Начать новый рейд после эвакуации или смерти.
+    StartRaid,
+    /// Клиент подтверждает, какой кадр у него сейчас. Сервер считает
+    /// следующую дельту от него, поэтому потеря пакета не рвёт состояние.
+    SnapshotAck {
+        tick: u64,
+    },
+    /// Ответ на серверный замер RTT.
+    Pong {
+        nonce: u64,
+    },
+}
+
+/// Почему закончился рейд.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RaidEndReason {
+    Extracted,
+    Died,
+}
+
+/// Итог рейда: причина, полученный опыт, вынесенное или потерянное и время.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RaidResult {
+    pub reason: RaidEndReason,
+    pub xp_gained: i64,
+    pub items: Vec<InventoryItem>,
+    pub duration_secs: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerPacket {
     Welcome {
         id: u64,
+        /// Версия протокола сервера; несовпадение — повод не начинать игру.
+        protocol: u16,
+        /// Границы и стены карты: клиент предсказывает движение той же
+        /// функцией, что и сервер, и обязан видеть те же препятствия.
+        bounds: Bounds,
+        obstacles: Vec<Aabb>,
     },
     LoginResult {
         ok: bool,
@@ -67,6 +254,38 @@ pub enum ServerPacket {
     /// Новый вариант добавляется только в конец: дискриминанты bincode
     /// позиционные, вставка в середину молча переинтерпретирует пакеты.
     Inventory(Inventory),
+    Pong {
+        nonce: u64,
+    },
+    /// Подтверждение выбранного оружия и остатка патронов.
+    Loadout {
+        weapon_id: u64,
+        ammo: u32,
+    },
+    /// Дельта схрона: столько добавилось после эвакуации. Клиент прибавляет
+    /// к своему списку и показывает тост.
+    Stash {
+        items: Vec<InventoryItem>,
+    },
+    /// Полное содержимое схрона (подключение и изъятие).
+    StashContents {
+        items: Vec<InventoryItem>,
+    },
+    /// Сервер отказал в выборе оружия: его нет в инвентаре.
+    LoadoutDenied {
+        weapon_id: u64,
+        reason: String,
+    },
+    /// Рейд закончился: клиент показывает экран результата, а не меню.
+    RaidResult {
+        result: RaidResult,
+    },
+    /// Изменения относительно подтверждённого кадра.
+    SnapshotDelta(SnapshotDelta),
+    /// Серверный замер RTT: клиент обязан немедленно ответить `Pong`.
+    Ping {
+        nonce: u64,
+    },
 }
 
 pub fn encode<T: Serialize>(packet: &T) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -415,5 +634,183 @@ mod tests {
         assert!(!lim.allow(1, t0), "второй пакет в том же окне отброшен");
         lim.forget(1);
         assert!(lim.allow(1, t0), "после forget состояние игрока сброшено");
+    }
+
+    #[test]
+    fn welcome_carries_protocol_and_terrain() {
+        let pkt = ServerPacket::Welcome {
+            id: 7,
+            protocol: PROTOCOL_VERSION,
+            bounds: Bounds::default(),
+            obstacles: vec![Aabb::new(Bounds::default().min, Bounds::default().max)],
+        };
+        let data = bincode::serialize(&pkt).unwrap();
+        match bincode::deserialize::<ServerPacket>(&data).unwrap() {
+            ServerPacket::Welcome {
+                id,
+                protocol,
+                obstacles,
+                ..
+            } => {
+                assert_eq!(id, 7);
+                assert_eq!(protocol, PROTOCOL_VERSION);
+                assert_eq!(obstacles.len(), 1, "стены обязаны доехать до клиента");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn ping_pong_and_loadout_roundtrip() {
+        let ping = bincode::serialize(&ClientPacket::Ping { nonce: 42 }).unwrap();
+        match decode_client(&ping).unwrap() {
+            ClientPacket::Ping { nonce } => assert_eq!(nonce, 42),
+            _ => panic!("wrong variant"),
+        }
+
+        let loadout = bincode::serialize(&ClientPacket::SetLoadout { weapon_id: 12 }).unwrap();
+        match decode_client(&loadout).unwrap() {
+            ClientPacket::SetLoadout { weapon_id } => assert_eq!(weapon_id, 12),
+            _ => panic!("wrong variant"),
+        }
+
+        let pong = bincode::serialize(&ServerPacket::Pong { nonce: 42 }).unwrap();
+        match bincode::deserialize::<ServerPacket>(&pong).unwrap() {
+            ServerPacket::Pong { nonce } => assert_eq!(nonce, 42),
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn stash_packets_roundtrip() {
+        let take = bincode::serialize(&ClientPacket::TakeFromStash {
+            item_id: 11,
+            quantity: 1,
+        })
+        .unwrap();
+        match decode_client(&take).unwrap() {
+            ClientPacket::TakeFromStash { item_id, quantity } => {
+                assert_eq!((item_id, quantity), (11, 1));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let contents = bincode::serialize(&ServerPacket::StashContents {
+            items: vec![InventoryItem {
+                item_id: 11,
+                quantity: 1,
+                slot: 0,
+            }],
+        })
+        .unwrap();
+        match bincode::deserialize::<ServerPacket>(&contents).unwrap() {
+            ServerPacket::StashContents { items } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].item_id, 11);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn raid_packets_roundtrip() {
+        let start = bincode::serialize(&ClientPacket::StartRaid).unwrap();
+        assert!(matches!(
+            decode_client(&start).unwrap(),
+            ClientPacket::StartRaid
+        ));
+
+        let result = RaidResult {
+            reason: RaidEndReason::Extracted,
+            xp_gained: 100,
+            items: vec![InventoryItem {
+                item_id: 1,
+                quantity: 2,
+                slot: 0,
+            }],
+            duration_secs: 42,
+        };
+        let bytes = bincode::serialize(&ServerPacket::RaidResult {
+            result: result.clone(),
+        })
+        .unwrap();
+        match bincode::deserialize::<ServerPacket>(&bytes).unwrap() {
+            ServerPacket::RaidResult { result: decoded } => assert_eq!(decoded, result),
+            _ => panic!("wrong variant"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod delta_tests {
+    use super::*;
+
+    fn snapshot(tick: u64) -> Snapshot {
+        Snapshot {
+            tick,
+            players: vec![PlayerState {
+                id: 1,
+                name: "p".into(),
+                position: Default::default(),
+                health: 100.0,
+                radiation: 0.0,
+                hunger: 100.0,
+                thirst: 100.0,
+                yaw: 0.0,
+                pitch: 0.0,
+                level: 1,
+                xp: 0,
+                velocity: Default::default(),
+                weapon_id: 10,
+                ammo: 90,
+                last_input_seq: 0,
+            }],
+            anomalies: Vec::new(),
+            artifacts: Vec::new(),
+            loot: Vec::new(),
+            creatures: Vec::new(),
+            extraction_zones: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn identical_frames_produce_empty_delta() {
+        let base = snapshot(1);
+        let delta = SnapshotDelta::between(&base, &base);
+        assert!(delta.is_empty(), "без изменений дельта пуста");
+    }
+
+    #[test]
+    fn delta_applies_back_to_full_frame_and_is_smaller() {
+        let mut base = snapshot(1);
+        base.loot = (0..40)
+            .map(|i| LootItem {
+                id: i,
+                position: Default::default(),
+                item: zn_sim::Item::from_catalog(1),
+            })
+            .collect();
+        let mut current = base.clone();
+        current.tick = 2;
+        current.players[0].health = 90.0;
+        current.loot.remove(0);
+
+        let delta = SnapshotDelta::between(&base, &current);
+        assert_eq!(delta.base_tick, 1);
+        assert_eq!(delta.tick, 2);
+        assert_eq!(delta.players.len(), 1, "изменился только игрок");
+        assert_eq!(delta.removed_loot, vec![0]);
+
+        let mut applied = base.clone();
+        delta.apply(&mut applied);
+        assert_eq!(applied, current, "дельта восстанавливает полный кадр");
+
+        let delta_bytes = bincode::serialize(&delta).unwrap().len();
+        let full_bytes = bincode::serialize(&current).unwrap().len();
+        println!("delta={delta_bytes}B full={full_bytes}B");
+        assert!(
+            delta_bytes * 4 < full_bytes,
+            "дельта {delta_bytes}B должна быть кратно меньше полного кадра {full_bytes}B"
+        );
     }
 }

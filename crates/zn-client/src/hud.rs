@@ -25,6 +25,11 @@ pub struct HudState {
     pub inventory: String,
     pub extract: f32,
     pub fps: f32,
+    /// Оружие, патроны и задержка канала: без них игрок не понимает, почему
+    /// выстрел не произошёл или цель «не пробилась».
+    pub weapon: String,
+    pub ammo: u32,
+    pub rtt_ms: f32,
     pub toasts: Vec<Toast>,
 }
 
@@ -102,7 +107,8 @@ fn stats(ctx: &egui::Context, s: &HudState) {
                     s.level,
                     s.xp.rem_euclid(1000)
                 ));
-                ui.label(format!("{:.0} FPS", s.fps));
+                ui.label(format!("{}   {:.0} FPS   {} ms", s.weapon, s.fps, s.rtt_ms));
+                ui.label(format!("патроны: {}", s.ammo));
             });
         });
 }
@@ -178,15 +184,14 @@ pub fn format_inventory(inv: &zn_sim::Inventory) -> String {
 }
 
 /// Имя предмета по id. Общее для HUD и панели инвентаря.
+///
+/// Обычные предметы берутся из каталога симуляции: HUD больше не держит
+/// второй список имён, который расходился с сервером.
 pub(crate) fn item_name(id: i64) -> String {
-    match id {
-        1 => "Medkit".into(),
-        2 => "Bandage".into(),
-        id if id >= zn_sim::ids::ARTIFACT_BASE as i64 => {
-            format!("Artifact {}", id - zn_sim::ids::ARTIFACT_BASE as i64)
-        }
-        other => format!("Item {other}"),
+    if id >= zn_sim::ids::ARTIFACT_BASE as i64 {
+        return format!("Artifact {}", id - zn_sim::ids::ARTIFACT_BASE as i64);
     }
+    zn_sim::items::name(id.max(0) as u64).to_string()
 }
 
 #[cfg(test)]

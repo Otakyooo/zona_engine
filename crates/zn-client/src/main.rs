@@ -11,17 +11,31 @@ use winit::keyboard::KeyCode;
 use winit::window::{CursorGrabMode, Window, WindowId};
 use zn_audio::Sfx;
 use zn_input::InputState;
-use zn_net::{ClientPacket, ServerPacket, encode};
+use zn_net::{ClientPacket, PROTOCOL_VERSION, ServerPacket, encode};
 use zn_render::{
     Camera, Mesh, RenderItem, Renderer, Texture, Vertex,
     geom::{self, make_box},
 };
 use zn_scene::Transform;
-use zn_sim::{InputCommand, Snapshot, interpolate, lerp_angle};
+use zn_sim::{
+    Aabb, Bounds, EYE_HEIGHT, GROUND_Y, InputCommand, Snapshot, interpolate, items, lerp_angle,
+};
 
 mod hud;
 mod perf;
+mod prediction;
 mod ui;
+
+/// Складывает дельту схрона в локальный список.
+fn merge_stack(stash: &mut Vec<zn_sim::InventoryItem>, incoming: &zn_sim::InventoryItem) {
+    if let Some(it) = stash.iter_mut().find(|i| i.item_id == incoming.item_id) {
+        it.quantity += incoming.quantity;
+    } else {
+        stash.push(incoming.clone());
+    }
+}
+
+use prediction::{Prediction, TICK_DT};
 
 #[derive(Parser, Debug)]
 struct Cli {
@@ -133,6 +147,10 @@ struct App {
     hud: hud::HudState,
     start: Instant,
     inventory: zn_sim::Inventory,
+    /// Схрон: полное содержимое из `StashContents`, дельты из `Stash`.
+    stash: Vec<zn_sim::InventoryItem>,
+    /// Итог последнего рейда; показывается на экране `Result`.
+    raid_result: Option<zn_net::RaidResult>,
     extract_elapsed: f32,
     fps: f32,
     perf: perf::PerfStats,
@@ -143,9 +161,21 @@ struct App {
     last_time: Option<Instant>,
     yaw: f32,
     pitch: f32,
-    vertical_velocity: f32,
     cursor_captured: bool,
     scene_path: Option<String>,
+    /// Предсказание движения и неподтверждённые команды.
+    prediction: Prediction,
+    /// Границы и стены карты из `Welcome` — те же, что у сервера.
+    server_bounds: Bounds,
+    obstacles: Vec<Aabb>,
+    input_accum: f32,
+    /// Оружие и патроны: сервер присылает их в профиле и снапшоте.
+    weapon_id: u64,
+    ammo: u32,
+    weapon_cooldown: f32,
+    rtt_ms: f32,
+    ping_at: Option<(u64, Instant)>,
+    protocol_ok: bool,
     /// Экран — состояние, а не флаг: от него зависит и ввод, и отрисовка.
     screen: ui::Screen,
     /// Переводит события winit в события egui. Без него кнопки не нажимаются.
@@ -159,6 +189,11 @@ struct App {
     player_id: Option<u64>,
     latest_snapshot: Option<Snapshot>,
     seq: u32,
+    /// Тик последнего применённого кадра: база для дельт и ack.
+    snapshot_tick: u64,
+    /// Когда применён последний кадр: по нему клиентские часы переводятся
+    /// в серверную шкалу для `Shot.client_time`.
+    snapshot_at: Option<Instant>,
     local_pos: Vec3,
 }
 
@@ -201,20 +236,23 @@ impl ApplicationHandler for App {
                     let (vs, is) = if let Some(mesh_path) = &node.mesh {
                         if mesh_path.ends_with(".gltf") || mesh_path.ends_with(".glb") {
                             if let Ok(lm) = zn_assets::load_gltf(std::path::Path::new(mesh_path)) {
+                                let model = node.transform.matrix();
+                                // Нормали трансформируются inverse-transpose:
+                                // при неравномерном масштабе обычная матрица
+                                // уводит их от граней и ломает освещение.
+                                let normal_matrix =
+                                    glam::Mat3::from_mat4(model).inverse().transpose();
                                 let mut vs = Vec::new();
                                 for (i, p) in lm.positions.iter().enumerate() {
                                     let v = glam::Vec3::from(*p);
-                                    let w = node.transform.matrix() * v.extend(1.0);
+                                    let w = model * v.extend(1.0);
                                     let n = lm
                                         .normals
                                         .as_ref()
                                         .and_then(|ns| ns.get(i).copied())
                                         .unwrap_or([0.0, 1.0, 0.0]);
-                                    let wn = node
-                                        .transform
-                                        .matrix()
-                                        .transform_vector3(glam::Vec3::from(n))
-                                        .normalize_or_zero();
+                                    let wn =
+                                        (normal_matrix * glam::Vec3::from(n)).normalize_or_zero();
                                     let c = lm
                                         .colors
                                         .as_ref()
@@ -372,8 +410,13 @@ impl ApplicationHandler for App {
                 if *state == winit::event::ElementState::Pressed
                     && *button == winit::event::MouseButton::Left
                     && self.cursor_captured
+                    && let Some(weapon) = items::weapon(self.weapon_id)
+                    // Локальный кулдаун только для отзывчивости: сервер
+                    // проверяет темп сам и отклонит лишний выстрел.
+                    && self.weapon_cooldown <= 0.0
+                    && self.ammo >= weapon.ammo_per_shot
                 {
-                    let origin = self.local_pos + Vec3::new(0.0, 1.6, 0.0);
+                    let origin = self.local_pos + Vec3::Y * EYE_HEIGHT;
                     let dir = Vec3::new(
                         self.yaw.cos() * self.pitch.cos(),
                         self.pitch.sin(),
@@ -383,9 +426,14 @@ impl ApplicationHandler for App {
                         seq: self.seq,
                         origin: [origin.x, origin.y, origin.z],
                         dir: [dir.x, dir.y, dir.z],
-                        client_time: 0,
+                        // Серверная шкала: тик последнего кадра плюс время,
+                        // прошедшее с его получения. Ноль здесь означал бы,
+                        // что сервер не знает, когда стреляли.
+                        client_time: self.server_time_ms(),
                     });
                     self.seq += 1;
+                    self.ammo = self.ammo.saturating_sub(weapon.ammo_per_shot);
+                    self.weapon_cooldown = weapon.cooldown_secs;
                     self.audio.play(Sfx::Shot, 1.0);
                 }
             }
@@ -471,9 +519,31 @@ impl ApplicationHandler for App {
                         }
                     };
                     match pkt {
-                        ServerPacket::Welcome { id } => {
-                            log::info!("welcome: player id {id}");
+                        ServerPacket::Welcome {
+                            id,
+                            protocol,
+                            bounds,
+                            obstacles,
+                        } => {
+                            if protocol != PROTOCOL_VERSION {
+                                log::error!(
+                                    "protocol mismatch: сервер {protocol}, клиент {PROTOCOL_VERSION}"
+                                );
+                                self.protocol_ok = false;
+                                self.hud.toasts.push((
+                                    "версия клиента не совпадает с сервером".into(),
+                                    Instant::now(),
+                                ));
+                            }
+                            log::info!(
+                                "welcome: player id {id}, {} стен, границы {:?}..{:?}",
+                                obstacles.len(),
+                                bounds.min,
+                                bounds.max
+                            );
                             self.player_id = Some(id);
+                            self.server_bounds = bounds;
+                            self.obstacles = obstacles;
                         }
                         ServerPacket::LoginResult { ok, error, .. } => {
                             if !ok {
@@ -486,6 +556,19 @@ impl ApplicationHandler for App {
                             log::info!("profile: {} level {}", profile.username, profile.level);
                             self.inventory = inventory;
                             self.hud.level = profile.level;
+                            self.weapon_id = profile.weapon_id;
+                            self.ammo = profile.ammo;
+                            // Сервер уже поставил новичка на точку спавна карты:
+                            // профиль несёт итоговую позицию, а не сохранённый ноль.
+                            self.prediction.teleport(profile.position);
+                            self.local_pos = profile.position;
+                            // Новый рейд: старые счётчики и интерполяция чужого
+                            // мира к нему не относятся.
+                            self.extract_elapsed = 0.0;
+                            self.last_health = 100.0;
+                            self.interp = RemoteInterp::default();
+                            self.latest_snapshot = None;
+                            self.snapshot_at = None;
                         }
                         ServerPacket::Inventory(inv) => {
                             // Звук подбора — когда предметов стало больше.
@@ -497,40 +580,99 @@ impl ApplicationHandler for App {
                             }
                             self.inventory = inv;
                         }
-                        ServerPacket::Snapshot(snap) => {
-                            // reconcile local
-                            if let Some(pid) = self.player_id
-                                && let Some(ps) = snap.players.iter().find(|p| p.id == pid)
-                            {
-                                let server_pos = ps.position;
-                                let dist = self.local_pos.distance(server_pos);
-                                if dist > 2.0 {
-                                    self.local_pos = server_pos;
-                                } else if dist > 0.5 {
-                                    self.local_pos = self.local_pos.lerp(server_pos, 0.25);
+                        ServerPacket::Ping { nonce } => {
+                            let _ = self.net_out.send(ClientPacket::Pong { nonce });
+                        }
+                        ServerPacket::Snapshot(snap) => self.apply_snapshot(snap),
+                        ServerPacket::SnapshotDelta(delta) => {
+                            if delta.base_tick == self.snapshot_tick {
+                                if let Some(snap) = self.latest_snapshot.as_mut() {
+                                    delta.apply(snap);
+                                    let applied = snap.clone();
+                                    self.apply_snapshot(applied);
                                 }
-                                // Углы не перезаписываем: снапшот приходит 20 раз
-                                // в секунду и перебивал бы локальную мышь.
-                                if let Some((yaw, pitch)) = zn_sim::correct_angles(
-                                    (self.yaw, self.pitch),
-                                    (ps.yaw, ps.pitch),
-                                ) {
-                                    self.yaw = yaw;
-                                    self.pitch = pitch;
-                                }
-                                // Смерть ловим по снапшоту: сервер уже
-                                // респавнит игрока, поэтому без экрана игрок
-                                // не заметил бы, что погиб.
-                                if ps.health <= 0.0 && self.screen == ui::Screen::Playing {
-                                    self.screen = ui::Screen::Dead;
-                                    self.release_cursor();
-                                }
+                            } else {
+                                // Клиент и сервер разошлись по базе: просим
+                                // следующий кадр от того, что у нас есть.
+                                log::debug!(
+                                    "snapshot delta base {} != current {}",
+                                    delta.base_tick,
+                                    self.snapshot_tick
+                                );
+                                let _ = self.net_out.send(ClientPacket::SnapshotAck {
+                                    tick: self.snapshot_tick,
+                                });
                             }
-                            // Копии позиций для сглаживания: `snap` уезжает в
-                            // `latest_snapshot`, а предыдущие значения нужны в кадре.
-                            self.interp
-                                .push(&snap.players, &snap.creatures, Instant::now());
-                            self.latest_snapshot = Some(snap);
+                        }
+                        ServerPacket::Pong { nonce } => {
+                            if let Some((expected, sent)) = self.ping_at
+                                && expected == nonce
+                            {
+                                let ms = sent.elapsed().as_secs_f32() * 1000.0;
+                                self.rtt_ms = if self.rtt_ms <= 0.0 {
+                                    ms
+                                } else {
+                                    self.rtt_ms * 0.8 + ms * 0.2
+                                };
+                                self.ping_at = None;
+                            }
+                        }
+                        ServerPacket::Loadout { weapon_id, ammo } => {
+                            self.weapon_id = weapon_id;
+                            self.ammo = ammo;
+                            self.weapon_cooldown = 0.0;
+                            self.hud.toasts.push((
+                                format!("оружие: {}", items::name(weapon_id)),
+                                Instant::now(),
+                            ));
+                        }
+                        ServerPacket::Stash { items } => {
+                            if !items.is_empty() {
+                                // Дельта: вынесенный лут добавляется к схрону,
+                                // а полный список приходит только на коннекте.
+                                for it in &items {
+                                    merge_stack(&mut self.stash, it);
+                                }
+                                let text = items
+                                    .iter()
+                                    .map(|i| {
+                                        format!(
+                                            "{} x{}",
+                                            items::name(i.item_id.max(0) as u64),
+                                            i.quantity
+                                        )
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                self.hud
+                                    .toasts
+                                    .push((format!("в схрон: {text}"), Instant::now()));
+                            }
+                        }
+                        ServerPacket::RaidResult { result } => {
+                            log::info!(
+                                "raid finished: {:?}, xp +{}, {} items, {}s",
+                                result.reason,
+                                result.xp_gained,
+                                result.items.len(),
+                                result.duration_secs
+                            );
+                            self.raid_result = Some(result);
+                            self.screen = ui::Screen::Result;
+                            self.release_cursor();
+                        }
+                        ServerPacket::StashContents { items } => {
+                            self.stash = items;
+                            log::info!("схрон: {} позиций", self.stash.len());
+                        }
+                        ServerPacket::LoadoutDenied { weapon_id, reason } => {
+                            self.hud.toasts.push((
+                                format!(
+                                    "{}: {reason}. Возьмите оружие из схрона.",
+                                    items::name(weapon_id)
+                                ),
+                                Instant::now(),
+                            ));
                         }
                         ServerPacket::ShotResult {
                             hit,
@@ -573,7 +715,9 @@ impl ApplicationHandler for App {
                         (self.pitch - self.input.gamepad_right.1 * dt * 2.0).clamp(-1.4, 1.4);
                 }
 
-                // movement (simplified, matching server)
+                // Предсказание: фиксированный шаг 1/60, ровно один вход на
+                // тик сервера. Отправка раз в кадр (144 Гц) давала несколько
+                // команд на тик и делала реплей недетерминированным.
                 // В меню и на экране смерти игрок стоит: нулевой вектор уходит
                 // на сервер, поэтому предсказание и сервер не расходятся.
                 let move_vec = if self.screen == ui::Screen::Playing {
@@ -581,32 +725,41 @@ impl ApplicationHandler for App {
                 } else {
                     Default::default()
                 };
-                let forward = Vec3::new(self.yaw.cos(), 0.0, self.yaw.sin());
-                let right = Vec3::new(forward.z, 0.0, -forward.x);
-                let mut vel = forward * (-move_vec.z) + right * move_vec.x;
-                vel *= 5.0;
-
-                // gravity
-                if self.local_pos.y <= 0.8 {
-                    self.vertical_velocity = 0.0;
-                } else {
-                    self.vertical_velocity -= 9.81 * dt;
+                self.input_accum = (self.input_accum + dt).min(0.25);
+                while self.input_accum >= TICK_DT {
+                    self.input_accum -= TICK_DT;
+                    let cmd = InputCommand {
+                        seq: self.seq,
+                        yaw: self.yaw,
+                        pitch: self.pitch,
+                        move_x: move_vec.x,
+                        move_z: move_vec.z,
+                        dt: TICK_DT,
+                    };
+                    self.seq += 1;
+                    self.prediction
+                        .predict(cmd.clone(), self.server_bounds, &self.obstacles);
+                    let _ = self.net_out.send(ClientPacket::Input(cmd));
                 }
-                vel.y = self.vertical_velocity;
+                self.local_pos = self.prediction.position;
+                self.weapon_cooldown = (self.weapon_cooldown - dt).max(0.0);
 
-                self.local_pos.x += vel.x * dt;
-                self.local_pos.y += vel.y * dt;
-                self.local_pos.z += vel.z * dt;
-                if self.local_pos.y < 0.8 {
-                    self.local_pos.y = 0.8;
-                    self.vertical_velocity = 0.0;
+                // Пинг раз в секунду: без него UDP-канал не отличить от
+                // живого, а игрок не видит лаг. Потерянный Pong не блокирует
+                // следующий замер.
+                let ping_due = match self.ping_at {
+                    None => true,
+                    Some((_, at)) => now.duration_since(at) >= Duration::from_secs(1),
+                };
+                if self.player_id.is_some() && ping_due {
+                    let nonce = self.start.elapsed().as_millis() as u64;
+                    let _ = self.net_out.send(ClientPacket::Ping { nonce });
+                    self.ping_at = Some((nonce, now));
                 }
-                self.local_pos.x = self.local_pos.x.clamp(-19.0, 19.0);
-                self.local_pos.z = self.local_pos.z.clamp(-19.0, 19.0);
 
                 // Шаги: только на земле и при движении.
                 let moving = move_vec.x.abs() + move_vec.z.abs() > 0.1;
-                let on_ground = self.local_pos.y <= 0.81;
+                let on_ground = self.local_pos.y <= GROUND_Y + 0.01;
                 if moving && on_ground {
                     self.step_timer -= dt;
                     if self.step_timer <= 0.0 {
@@ -616,18 +769,6 @@ impl ApplicationHandler for App {
                 } else {
                     self.step_timer = 0.0;
                 }
-
-                // send input
-                let cmd = InputCommand {
-                    seq: self.seq,
-                    yaw: self.yaw,
-                    pitch: self.pitch,
-                    move_x: move_vec.x,
-                    move_z: move_vec.z,
-                    dt,
-                };
-                self.seq += 1;
-                let _ = self.net_out.send(ClientPacket::Input(cmd));
 
                 // данные HUD: всё, что уже приходит в снапшоте и профиле
                 if let Some(snap) = &self.latest_snapshot {
@@ -664,13 +805,16 @@ impl ApplicationHandler for App {
                 }
                 self.hud.inventory = hud::format_inventory(&self.inventory);
                 self.hud.fps = self.fps;
+                self.hud.rtt_ms = self.rtt_ms;
+                self.hud.ammo = self.ammo;
+                self.hud.weapon = items::name(self.weapon_id).to_string();
                 // Просроченные сообщения убираем, иначе очередь растёт бесконечно.
                 self.hud
                     .toasts
                     .retain(|(_, at)| now.duration_since(*at).as_secs_f32() <= hud::TOAST_TTL);
 
                 // camera
-                let eye = self.local_pos + Vec3::new(0.0, 1.6, 0.0);
+                let eye = self.local_pos + Vec3::Y * EYE_HEIGHT;
                 let dir = Vec3::new(
                     self.yaw.cos() * self.pitch.cos(),
                     self.pitch.sin(),
@@ -849,11 +993,19 @@ impl ApplicationHandler for App {
                 let mut action = ui::Action::None;
                 let hud_state = &self.hud;
                 let inventory = &self.inventory;
+                let stash = &self.stash;
+                let raid_result = self.raid_result.as_ref();
                 let show_inventory = self.show_inventory;
+                let weapon_id = self.weapon_id;
+                let protocol_ok = self.protocol_ok;
                 let output = self.egui_ctx.run(raw, |ctx| {
                     action = match screen {
-                        ui::Screen::Menu => ui::menu(ctx),
+                        ui::Screen::Menu => ui::menu(ctx, weapon_id, protocol_ok, inventory, stash),
                         ui::Screen::Dead => ui::dead(ctx, hud_state.xp, hud_state.level),
+                        ui::Screen::Result => match raid_result {
+                            Some(result) => ui::result(ctx, result),
+                            None => ui::Action::ToMenu,
+                        },
                         ui::Screen::Playing => {
                             hud::draw(ctx, hud_state, Instant::now());
                             if show_inventory {
@@ -864,17 +1016,30 @@ impl ApplicationHandler for App {
                     };
                 });
 
+                let mut render_stats = zn_render::RenderStats::default();
                 if let Some(r) = self.renderer.as_mut() {
                     let ui = zn_render::UiFrame {
                         ctx: &self.egui_ctx,
                         output,
                     };
                     let _ = r.render(&render_items, &self.camera, Some(ui));
+                    render_stats = r.stats();
                 }
 
                 self.perf.end_frame(render_items.len());
                 if let Some(line) = self.perf.take_report(Instant::now()) {
-                    log::info!("[perf] {line}");
+                    // Сеть в том же окне: queue — неподтверждённые команды,
+                    // corrections — сколько раз пришлось принять серверную
+                    // позицию. Рост любого из чисел виден до жалобы игрока.
+                    log::info!(
+                        "[perf] {line} drawn={} culled={} calls={} pred_queue={} ack={} corrections={}",
+                        render_stats.drawn,
+                        render_stats.culled,
+                        render_stats.draw_calls,
+                        self.prediction.pending_len(),
+                        self.prediction.last_acked(),
+                        self.prediction.corrections()
+                    );
                 }
 
                 // Действие меню применяется после кадра: до этого момента
@@ -882,10 +1047,28 @@ impl ApplicationHandler for App {
                 // курсора через &mut self с ними бы конфликтовал.
                 match action {
                     ui::Action::StartRaid => {
+                        // Сервер решает, можно ли начать рейд: клиент не должен
+                        // телепортировать себя сам.
+                        let _ = self.net_out.send(ClientPacket::StartRaid);
+                        self.raid_result = None;
                         self.screen = ui::Screen::Playing;
                         self.capture_cursor();
                     }
+                    ui::Action::ToMenu => {
+                        self.screen = ui::Screen::Menu;
+                        self.release_cursor();
+                    }
                     ui::Action::Quit => event_loop.exit(),
+                    ui::Action::SetWeapon(id) => {
+                        let _ = self
+                            .net_out
+                            .send(ClientPacket::SetLoadout { weapon_id: id });
+                    }
+                    ui::Action::TakeItem(item_id, quantity) => {
+                        let _ = self
+                            .net_out
+                            .send(ClientPacket::TakeFromStash { item_id, quantity });
+                    }
                     ui::Action::None => {}
                 }
 
@@ -916,6 +1099,68 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    /// Оценка серверного времени в миллисекундах по последнему кадру.
+    fn server_time_ms(&self) -> u64 {
+        let base = self.snapshot_tick as f64 * (1000.0 / 60.0);
+        let since = self
+            .snapshot_at
+            .map(|at| at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
+        (base + since) as u64
+    }
+
+    /// Применяет полный кадр: keyframe с сервера или собранный из дельты.
+    fn apply_snapshot(&mut self, snap: Snapshot) {
+        if snap.tick <= self.snapshot_tick {
+            return;
+        }
+        self.snapshot_tick = snap.tick;
+        self.snapshot_at = Some(Instant::now());
+        // Реконсиляция: принимаем серверную позицию только
+        // при заметной ошибке и переигрываем неподтверждённые
+        // команды — иначе мышь и клавиши отстают на снапшот.
+        if let Some(pid) = self.player_id
+            && let Some(ps) = snap.players.iter().find(|p| p.id == pid)
+        {
+            self.prediction.reconcile(
+                ps.position,
+                ps.velocity,
+                ps.last_input_seq,
+                self.server_bounds,
+                &self.obstacles,
+            );
+            self.local_pos = self.prediction.position;
+            self.weapon_id = ps.weapon_id;
+            // Патроны — серверная правда. Локальный расход
+            // нужен только для мгновенной реакции; если
+            // сервер выстрел отклонил, он вернёт число.
+            self.ammo = ps.ammo;
+            // Углы не перезаписываем: снапшот приходит 20 раз
+            // в секунду и перебивал бы локальную мышь.
+            if let Some((yaw, pitch)) =
+                zn_sim::correct_angles((self.yaw, self.pitch), (ps.yaw, ps.pitch))
+            {
+                self.yaw = yaw;
+                self.pitch = pitch;
+            }
+            // Смерть ловим по снапшоту: сервер уже
+            // респавнит игрока, поэтому без экрана игрок
+            // не заметил бы, что погиб.
+            if ps.health <= 0.0 && self.screen == ui::Screen::Playing {
+                self.screen = ui::Screen::Dead;
+                self.release_cursor();
+            }
+        }
+        // Копии позиций для сглаживания: `snap` уезжает в
+        // `latest_snapshot`, а предыдущие значения нужны в кадре.
+        self.interp
+            .push(&snap.players, &snap.creatures, Instant::now());
+        self.latest_snapshot = Some(snap);
+        let _ = self.net_out.send(ClientPacket::SnapshotAck {
+            tick: self.snapshot_tick,
+        });
+    }
+
     /// Захват курсора — только по явному действию игрока (меню или клик).
     fn capture_cursor(&mut self) {
         self.cursor_captured = true;
@@ -1146,6 +1391,8 @@ fn main() {
         hud: hud::HudState::default(),
         start: Instant::now(),
         inventory: zn_sim::Inventory::default(),
+        stash: Vec::new(),
+        raid_result: None,
         extract_elapsed: 0.0,
         fps: 0.0,
         perf: perf::PerfStats::new(),
@@ -1156,9 +1403,18 @@ fn main() {
         last_time: None,
         yaw: 0.0,
         pitch: 0.0,
-        vertical_velocity: 0.0,
         cursor_captured: false,
         scene_path: cli.scene,
+        prediction: Prediction::new(Vec3::new(0.0, GROUND_Y, 0.0)),
+        server_bounds: Bounds::default(),
+        obstacles: Vec::new(),
+        input_accum: 0.0,
+        weapon_id: items::DEFAULT_WEAPON,
+        ammo: items::START_AMMO,
+        weapon_cooldown: 0.0,
+        rtt_ms: 0.0,
+        ping_at: None,
+        protocol_ok: true,
         screen: ui::Screen::Menu,
         egui_state: None,
         show_inventory: false,
@@ -1168,6 +1424,8 @@ fn main() {
         player_id: None,
         latest_snapshot: None,
         seq: 0,
+        snapshot_tick: 0,
+        snapshot_at: None,
         local_pos: Vec3::new(0.0, 0.8, 0.0),
     };
     event_loop.run_app(&mut app).expect("run");

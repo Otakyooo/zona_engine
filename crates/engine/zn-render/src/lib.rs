@@ -20,6 +20,112 @@ pub struct Mesh {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub num_indices: u32,
+    /// Границы в локальном пространстве меша. Нужны для отсечения по пирамиде
+    /// видимости: без них приходилось рисовать всё, что попало в снапшот.
+    pub bounds: MeshBounds,
+}
+
+/// Ось-выровненные границы меша.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeshBounds {
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
+impl MeshBounds {
+    pub fn from_vertices(vertices: &[Vertex]) -> Self {
+        if vertices.is_empty() {
+            return Self {
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+            };
+        }
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for v in vertices {
+            let p = Vec3::from(v.position);
+            min = min.min(p);
+            max = max.max(p);
+        }
+        Self { min, max }
+    }
+
+    /// Границы, повёрнутые и сдвинутые матрицей модели. Берётся AABB восьми
+    /// углов: точнее для отсечения не нужно, а стоимость копеечная.
+    pub fn transformed(&self, model: Mat4) -> (Vec3, Vec3) {
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        for i in 0..8u32 {
+            let corner = Vec3::new(
+                if i & 1 == 0 { self.min.x } else { self.max.x },
+                if i & 2 == 0 { self.min.y } else { self.max.y },
+                if i & 4 == 0 { self.min.z } else { self.max.z },
+            );
+            let p = model.transform_point3(corner);
+            min = min.min(p);
+            max = max.max(p);
+        }
+        (min, max)
+    }
+}
+
+/// Пирамида видимости: шесть плоскостей, извлечённых из `view_proj`.
+#[derive(Clone, Copy, Debug)]
+pub struct Frustum {
+    planes: [[f32; 4]; 6],
+}
+
+impl Frustum {
+    pub fn from_view_proj(m: Mat4) -> Self {
+        // glam хранит матрицу по столбцам; плоскости собираются из строк.
+        let r0 = [m.x_axis.x, m.y_axis.x, m.z_axis.x, m.w_axis.x];
+        let r1 = [m.x_axis.y, m.y_axis.y, m.z_axis.y, m.w_axis.y];
+        let r2 = [m.x_axis.z, m.y_axis.z, m.z_axis.z, m.w_axis.z];
+        let r3 = [m.x_axis.w, m.y_axis.w, m.z_axis.w, m.w_axis.w];
+        let add = |a: [f32; 4], b: [f32; 4]| [a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]];
+        let sub = |a: [f32; 4], b: [f32; 4]| [a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]];
+        let mut planes = [
+            add(r3, r0), // left
+            sub(r3, r0), // right
+            add(r3, r1), // bottom
+            sub(r3, r1), // top
+            r2,          // near: clip z >= 0
+            sub(r3, r2), // far
+        ];
+        for p in &mut planes {
+            let n = Vec3::new(p[0], p[1], p[2]).length();
+            if n > 0.0 {
+                for v in p.iter_mut() {
+                    *v /= n;
+                }
+            }
+        }
+        Self { planes }
+    }
+
+    /// Пересекается ли AABB с пирамидой. Ложные срабатывания допустимы
+    /// (объект лишний раз нарисуется), пропуски — нет.
+    pub fn intersects_aabb(&self, min: Vec3, max: Vec3) -> bool {
+        for p in &self.planes {
+            let x = if p[0] >= 0.0 { max.x } else { min.x };
+            let y = if p[1] >= 0.0 { max.y } else { min.y };
+            let z = if p[2] >= 0.0 { max.z } else { min.z };
+            if p[0] * x + p[1] * y + p[2] * z + p[3] < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Что произошло в кадре: сколько объектов прошло отсечение, сколько
+/// нарисовано и сколько draw call'ов отправлено.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RenderStats {
+    pub total: usize,
+    pub drawn: usize,
+    pub culled: usize,
+    pub draw_calls: usize,
 }
 
 pub struct Texture {
@@ -105,6 +211,8 @@ pub struct Renderer {
     depth_view: wgpu::TextureView,
     egui_renderer: egui_wgpu::Renderer,
     egui_format: wgpu::TextureFormat,
+    stats: RenderStats,
+    overflow_warned: bool,
 }
 
 /// Кадр интерфейса, подготовленный клиентом.
@@ -377,6 +485,8 @@ impl Renderer {
             depth_view,
             egui_renderer,
             egui_format,
+            stats: RenderStats::default(),
+            overflow_warned: false,
         })
     }
 
@@ -399,7 +509,13 @@ impl Renderer {
             vertex_buffer,
             index_buffer,
             num_indices: indices.len() as u32,
+            bounds: MeshBounds::from_vertices(vertices),
         }
+    }
+
+    /// Статистика последнего кадра — для perf-лога, а не для геймплея.
+    pub fn stats(&self) -> RenderStats {
+        self.stats
     }
 
     pub fn create_texture(&self, rgba: &[u8], width: u32, height: u32) -> Texture {
@@ -464,17 +580,52 @@ impl Renderer {
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
 
+        // Отсечение по пирамиде видимости. Раньше в кадр шло всё, что попало
+        // в снапшот, включая объекты за спиной; на большой карте это первое,
+        // что упирается в бюджет кадра.
+        let frustum = Frustum::from_view_proj(camera.view_proj());
+        let mut visible: Vec<usize> = Vec::with_capacity(items.len());
+        for (i, item) in items.iter().enumerate() {
+            let (min, max) = item.mesh.bounds.transformed(item.model);
+            if frustum.intersects_aabb(min, max) {
+                visible.push(i);
+            }
+        }
+        let culled = items.len() - visible.len();
+
+        // Один материал подряд: смена bind group между каждым объектом — лишняя
+        // работа для драйвера даже при том же числе draw call'ов.
+        visible.sort_by_key(|&i| {
+            items[i]
+                .texture
+                .map(|t| t as *const Texture as usize)
+                .unwrap_or(0)
+        });
+
+        let count = visible.len().min(MAX_RENDER_OBJECTS);
+        if visible.len() > MAX_RENDER_OBJECTS {
+            if !self.overflow_warned {
+                log::warn!(
+                    "кадр обрезан: {} видимых объектов, лимит {MAX_RENDER_OBJECTS}; \
+                     поднимайте слоты вместе с картой",
+                    visible.len()
+                );
+                self.overflow_warned = true;
+            }
+        } else {
+            self.overflow_warned = false;
+        }
+
         // Все матрицы кадра — одной записью. Слоты идут с шагом выравнивания,
         // поэтому хвост каждого слота остаётся нулевым, и это нормально.
-        let count = items.len().min(MAX_RENDER_OBJECTS);
         if count > 0 {
             let stride = self.model_stride as usize;
             let mut data = vec![0u8; stride * count];
-            for (i, item) in items.iter().take(count).enumerate() {
+            for (slot, &i) in visible.iter().take(count).enumerate() {
                 let m = ModelUniform {
-                    model: item.model.to_cols_array_2d(),
+                    model: items[i].model.to_cols_array_2d(),
                 };
-                let start = i * stride;
+                let start = slot * stride;
                 data[start..start + MODEL_UNIFORM_SIZE as usize]
                     .copy_from_slice(bytemuck::bytes_of(&m));
             }
@@ -519,10 +670,11 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            for (i, item) in items.iter().take(count).enumerate() {
+            for (slot, &i) in visible.iter().take(count).enumerate() {
+                let item = &items[i];
                 let t = item.texture.unwrap_or(&self.default_texture);
                 pass.set_bind_group(1, &t.bind_group, &[]);
-                let offset = (i as u64 * self.model_stride) as u32;
+                let offset = (slot as u64 * self.model_stride) as u32;
                 pass.set_bind_group(2, &self.model_bind_group, &[offset]);
                 pass.set_vertex_buffer(0, item.mesh.vertex_buffer.slice(..));
                 pass.set_index_buffer(item.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -591,6 +743,12 @@ impl Renderer {
                 .chain(std::iter::once(encoder.finish())),
         );
         output.present();
+        self.stats = RenderStats {
+            total: items.len(),
+            drawn: count,
+            culled,
+            draw_calls: count,
+        };
         Ok(())
     }
 }
@@ -826,3 +984,65 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     return vec4<f32>(color, 1.0);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn camera() -> Camera {
+        Camera {
+            eye: Vec3::new(0.0, 1.0, 5.0),
+            target: Vec3::new(0.0, 1.0, 0.0),
+            up: Vec3::Y,
+            fov_y: 1.0,
+            aspect: 1.0,
+            near: 0.1,
+            far: 100.0,
+        }
+    }
+
+    #[test]
+    fn mesh_bounds_identity_is_source_bounds() {
+        let b = MeshBounds {
+            min: Vec3::new(-1.0, 0.0, -2.0),
+            max: Vec3::new(1.0, 2.0, 2.0),
+        };
+        let (min, max) = b.transformed(Mat4::IDENTITY);
+        assert_eq!(min, b.min);
+        assert_eq!(max, b.max);
+    }
+
+    #[test]
+    fn mesh_bounds_follow_translation() {
+        let b = MeshBounds {
+            min: Vec3::splat(-1.0),
+            max: Vec3::splat(1.0),
+        };
+        let (min, max) = b.transformed(Mat4::from_translation(Vec3::new(10.0, 0.0, 0.0)));
+        assert!((min.x - 9.0).abs() < 1e-5, "min={min:?}");
+        assert!((max.x - 11.0).abs() < 1e-5, "max={max:?}");
+    }
+
+    #[test]
+    fn frustum_keeps_object_in_front() {
+        let f = Frustum::from_view_proj(camera().view_proj());
+        assert!(
+            f.intersects_aabb(Vec3::splat(-0.5), Vec3::splat(0.5)),
+            "объект перед камерой должен проходить отсечение"
+        );
+    }
+
+    #[test]
+    fn frustum_rejects_object_behind_camera() {
+        let f = Frustum::from_view_proj(camera().view_proj());
+        // Камера смотрит в -Z; объект за спиной — на +Z от неё.
+        assert!(!f.intersects_aabb(Vec3::new(-1.0, 0.0, 9.0), Vec3::new(1.0, 2.0, 11.0)));
+    }
+
+    #[test]
+    fn frustum_rejects_far_and_sideways_objects() {
+        let f = Frustum::from_view_proj(camera().view_proj());
+        assert!(!f.intersects_aabb(Vec3::new(-1.0, 0.0, -300.0), Vec3::new(1.0, 2.0, -200.0)));
+        assert!(!f.intersects_aabb(Vec3::new(40.0, 0.0, -1.0), Vec3::new(42.0, 2.0, 1.0)));
+    }
+}

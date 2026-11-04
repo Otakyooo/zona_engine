@@ -58,7 +58,7 @@ fn shot_hits_creature_in_front() {
         .push(creature_at(cid, Vec3::new(0.0, 0.8, 5.0), 50.0));
 
     let outcome = w
-        .apply_shot(1, Vec3::new(0.0, 2.4, 0.0), AIM_DOWN, &[])
+        .apply_shot(1, Vec3::new(0.0, 2.4, 0.0), AIM_DOWN)
         .expect("выстрел должен быть принят");
 
     assert_eq!(outcome.hit, Some(cid));
@@ -77,7 +77,7 @@ fn shot_misses_when_creature_is_behind() {
     ));
 
     let outcome = w
-        .apply_shot(1, Vec3::new(0.0, 2.4, 0.0), Vec3::new(0.0, 0.0, -1.0), &[])
+        .apply_shot(1, Vec3::new(0.0, 2.4, 0.0), Vec3::new(0.0, 0.0, -1.0))
         .expect("выстрел должен быть принят");
 
     assert_eq!(outcome.hit, None);
@@ -94,9 +94,10 @@ fn wall_blocks_shot() {
         50.0,
     ));
     let wall = Aabb::new(Vec3::new(0.0, 2.0, 2.5), Vec3::new(3.0, 2.0, 0.2));
+    w.obstacles = vec![wall];
 
     let outcome = w
-        .apply_shot(1, Vec3::new(0.0, 2.4, 0.0), AIM_DOWN, &[wall])
+        .apply_shot(1, Vec3::new(0.0, 2.4, 0.0), AIM_DOWN)
         .expect("выстрел должен быть принят");
 
     assert_eq!(outcome.hit, None, "стена ближе цели — попадания нет");
@@ -109,12 +110,12 @@ fn shot_from_foreign_origin_rejected() {
     w.add_player(shooter());
 
     assert!(
-        w.apply_shot(1, Vec3::new(100.0, 100.0, 100.0), Vec3::Z, &[])
+        w.apply_shot(1, Vec3::new(100.0, 100.0, 100.0), Vec3::Z)
             .is_none(),
         "стрельба из чужой точки должна отклоняться"
     );
     assert!(
-        w.apply_shot(1, Vec3::new(0.0, 2.4, 0.0), Vec3::ZERO, &[])
+        w.apply_shot(1, Vec3::new(0.0, 2.4, 0.0), Vec3::ZERO)
             .is_none(),
         "нулевое направление недопустимо"
     );
@@ -129,7 +130,7 @@ fn kill_awards_xp_once() {
         .push(creature_at(cid, Vec3::new(0.0, 0.8, 5.0), 20.0));
 
     let outcome = w
-        .apply_shot(1, Vec3::new(0.0, 2.4, 0.0), AIM_DOWN, &[])
+        .apply_shot(1, Vec3::new(0.0, 2.4, 0.0), AIM_DOWN)
         .expect("выстрел принят");
 
     assert!(outcome.killed);
@@ -160,7 +161,7 @@ fn shot_kills_player_and_drops_loot_once() {
     w.add_player(victim);
 
     let outcome = w
-        .apply_shot(1, Vec3::new(0.0, 2.4, 0.0), Vec3::Z, &[])
+        .apply_shot(1, Vec3::new(0.0, 2.4, 0.0), Vec3::Z)
         .expect("выстрел принят");
 
     assert_eq!(outcome.hit, Some(2), "попадание по игроку должно работать");
@@ -186,14 +187,14 @@ fn shot_kills_player_and_drops_loot_once() {
     );
 }
 
-fn shooter_with(weapon: &str) -> Player {
+fn shooter_with(weapon: u64) -> Player {
     let mut p = shooter();
-    p.equipped_weapon = weapon.into();
+    p.equipped_weapon = weapon;
     p
 }
 
 /// Стоящий на земле игрок в 3 м по +Z: глаза стрелка на 1.6 м.
-fn duel(weapon: &str) -> SimWorld {
+fn duel(weapon: u64) -> SimWorld {
     let mut w = SimWorld::new();
     w.add_player(shooter_with(weapon));
     let mut victim = Player::new(2, "victim");
@@ -204,11 +205,11 @@ fn duel(weapon: &str) -> SimWorld {
 
 #[test]
 fn headshot_kills_with_one_rifle_bullet() {
-    let mut w = duel("rifle");
+    let mut w = duel(items::RIFLE);
 
     // Чуть вверх: к голове жертвы (1.55…1.8 м) на дистанции 3 м.
     let outcome = w
-        .apply_shot(1, Vec3::new(0.0, 1.6, 0.0), Vec3::new(0.0, 0.05, 1.0), &[])
+        .apply_shot(1, Vec3::new(0.0, 1.6, 0.0), Vec3::new(0.0, 0.05, 1.0))
         .expect("выстрел принят");
 
     assert_eq!(outcome.hit, Some(2));
@@ -227,11 +228,11 @@ fn headshot_kills_with_one_rifle_bullet() {
 
 #[test]
 fn body_shot_deals_base_damage() {
-    let mut w = duel("rifle");
+    let mut w = duel(items::RIFLE);
 
     // В грудь: на дистанции 3 м луч идёт на 1.0 м.
     let outcome = w
-        .apply_shot(1, Vec3::new(0.0, 1.6, 0.0), Vec3::new(0.0, -0.2, 1.0), &[])
+        .apply_shot(1, Vec3::new(0.0, 1.6, 0.0), Vec3::new(0.0, -0.2, 1.0))
         .expect("выстрел принят");
 
     assert_eq!(outcome.zone, Some(HitZone::Body));
@@ -246,10 +247,10 @@ fn body_shot_deals_base_damage() {
 
 #[test]
 fn shot_above_head_misses() {
-    let mut w = duel("rifle");
+    let mut w = duel(items::RIFLE);
 
     let outcome = w
-        .apply_shot(1, Vec3::new(0.0, 1.6, 0.0), Vec3::new(0.0, 0.3, 1.0), &[])
+        .apply_shot(1, Vec3::new(0.0, 1.6, 0.0), Vec3::new(0.0, 0.3, 1.0))
         .expect("выстрел принят");
 
     assert_eq!(outcome.hit, None);
@@ -262,10 +263,10 @@ fn shot_above_head_misses() {
 /// Поведение зафиксировано тестом, чтобы его нельзя было изменить молча.
 #[test]
 fn eye_level_shot_counts_as_head() {
-    let mut w = duel("pistol");
+    let mut w = duel(items::PISTOL);
 
     let outcome = w
-        .apply_shot(1, Vec3::new(0.0, 1.6, 0.0), Vec3::Z, &[])
+        .apply_shot(1, Vec3::new(0.0, 1.6, 0.0), Vec3::Z)
         .expect("выстрел принят");
 
     assert_eq!(outcome.zone, Some(HitZone::Head));
@@ -276,14 +277,14 @@ fn eye_level_shot_counts_as_head() {
 #[test]
 fn headshot_scales_creature_damage() {
     let mut w = SimWorld::new();
-    w.add_player(shooter_with("pistol"));
+    w.add_player(shooter_with(items::PISTOL));
     let cid = ids::CREATURE_BASE + 1;
     w.creatures
         .push(creature_at(cid, Vec3::new(0.0, 0.8, 5.0), 100.0));
 
     // Существо стоит с 0.8 м, голова — 1.75…2.0 м: луч приходит на 1.9 м.
     let outcome = w
-        .apply_shot(1, Vec3::new(0.0, 1.6, 0.0), Vec3::new(0.0, 0.06, 1.0), &[])
+        .apply_shot(1, Vec3::new(0.0, 1.6, 0.0), Vec3::new(0.0, 0.06, 1.0))
         .expect("выстрел принят");
 
     assert_eq!(outcome.hit, Some(cid));

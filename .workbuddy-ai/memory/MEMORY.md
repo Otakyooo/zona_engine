@@ -7,12 +7,13 @@
 | `PITFALLS.md` | Подводные камни: симптом → причина → что делать |
 | `DECISIONS.md` | ADR-lite: принятые архитектурные решения и их следствия |
 | `OPEN.md` | Открытые задачи по приоритету |
+| `REJECTED.md` | Отбракованные идеи и чем заменены |
 | `journal/YYYY-MM-DD.md` | Дневник: что сделано, зачем, проверки, числа |
 | `../archive/` | Устаревшие артефакты (например `manifest-v0.1.6.json`) |
 
 ## Что это за проект
 
-Extraction-shooter в стиле Stalker/Zone: собственный движок на Rust (wgpu 24, winit 0.30, egui, rapier3d), авторитарный сервер (TCP + UDP), SQLite/Postgres, Electron-лаунчер. 13 крейтов, Rust edition 2024, 88 тестов.
+Extraction-shooter в стиле Stalker/Zone: собственный движок на Rust (wgpu 24, winit 0.30, egui, rapier3d), авторитарный сервер (TCP + UDP), SQLite/Postgres, Electron-лаунчер. 13 крейтов, Rust edition 2024, 128 тестов.
 
 - `crates/engine/` — zn-core, zn-render, zn-physics, zn-audio, zn-assets, zn-input, zn-net, zn-scene
 - `crates/game/` — zn-sim (общая симуляция), zn-content
@@ -21,8 +22,9 @@ Extraction-shooter в стиле Stalker/Zone: собственный движо
 
 ## Расположение
 
-- Текущая рабочая папка: `E:\zona_engine` (старая копия, оставленная как бэкап).
+- Рабочая папка сессии 2026-11-03: `E:\zona_engine2`.
 - Каноническая: `C:\Users\russi\WorkBuddy AI\Zona_games` — путь с пробелом, квотировать в shell.
+- Старый бэкап: `E:\zona_engine`; артефакты оттуда могут содержать зашитый старый `CARGO_MANIFEST_DIR` (см. `PITFALLS.md`).
 - Remote: `https://github.com/Otakyooo/zona_engine`, ветка `main`. История перенесена локальным клоном 2026-10-31.
 
 ## Команды

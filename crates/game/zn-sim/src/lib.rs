@@ -2,7 +2,7 @@
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Пространства идентификаторов, общие для клиента и сервера.
 ///
@@ -41,8 +41,17 @@ pub mod ids {
     }
 }
 
+pub mod items;
+
 /// Горизонтальная скорость игрока, м/с.
 const MOVE_SPEED: f32 = 5.0;
+
+/// Ускорение свободного падения, м/с². Одно на клиент и сервер: клиент
+/// предсказывает движение той же функцией, что и сервер.
+pub const GRAVITY: f32 = 9.81;
+/// Высота ног над полом на земле, м. Арена собрана так, что верх пола — 0.5 м;
+/// 0.8 оставляет запас и зафиксировано тестами.
+pub const GROUND_Y: f32 = 0.8;
 
 /// Высота глаз стрелка над позицией ног.
 pub const EYE_HEIGHT: f32 = 1.6;
@@ -53,12 +62,12 @@ pub const SHOT_RANGE: f32 = 120.0;
 /// XP за убитое существо.
 pub const CREATURE_KILL_XP: i64 = 50;
 /// Силуэт игрока: высота 1.8 м, ширина 0.6 м, голова — верхние 0.25 м.
-const PLAYER_HEIGHT: f32 = 1.8;
-const PLAYER_HALF_WIDTH: f32 = 0.3;
+pub const PLAYER_HEIGHT: f32 = 1.8;
+pub const PLAYER_HALF_WIDTH: f32 = 0.3;
 const PLAYER_HEAD_HEIGHT: f32 = 0.25;
 /// Силуэт существа по умолчанию: высота 1.2 м, ширина 0.8 м.
-const CREATURE_HEIGHT: f32 = 1.2;
-const CREATURE_HALF_WIDTH: f32 = 0.4;
+pub const CREATURE_HEIGHT: f32 = 1.2;
+pub const CREATURE_HALF_WIDTH: f32 = 0.4;
 const CREATURE_HEAD_HEIGHT: f32 = 0.25;
 /// Голова уже корпуса: попасть в неё труднее, чем в грудь.
 const HEAD_WIDTH_RATIO: f32 = 0.66;
@@ -92,6 +101,16 @@ pub struct InputCommand {
     pub move_x: f32,
     pub move_z: f32,
     pub dt: f32,
+}
+
+/// Ввод приходит из сети без проверок: нечисловая команда отравляет позицию
+/// (`f32::clamp` на NaN возвращает NaN), поэтому она отбрасывается целиком.
+pub fn input_is_finite(cmd: &InputCommand) -> bool {
+    cmd.yaw.is_finite()
+        && cmd.pitch.is_finite()
+        && cmd.move_x.is_finite()
+        && cmd.move_z.is_finite()
+        && cmd.dt.is_finite()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -160,7 +179,10 @@ pub struct CreatureSpawn {
 }
 
 /// Выровненный по осям бокс. Стены карты и хитбоксы — всё это `Aabb`.
-#[derive(Clone, Copy, Debug)]
+///
+/// `Serialize` нужен, чтобы сервер один раз отправил статические боксы карты
+/// клиенту: предсказание движения обязано видеть те же стены, что и сервер.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Aabb {
     pub center: Vec3,
     pub half_extents: Vec3,
@@ -219,6 +241,127 @@ pub fn ray_aabb(origin: Vec3, dir: Vec3, max_dist: f32, b: &Aabb) -> Option<f32>
     Some(t_min)
 }
 
+/// Желаемая горизонтальная скорость по команде ввода.
+///
+/// Вынесено из `apply_input`, чтобы клиентское предсказание считало скорость
+/// той же формулой, а не своей копией: расхождение «диагональ быстрее» или
+/// другой знак `move_z` иначе всплывает только под нагрузкой.
+pub fn desired_velocity(yaw: f32, move_x: f32, move_z: f32) -> Vec3 {
+    let forward = Vec3::new(yaw.cos(), 0.0, yaw.sin());
+    let right = Vec3::new(forward.z, 0.0, -forward.x);
+    let mut vel = forward * (-move_z) + right * move_x;
+    // Диагональ не должна быть быстрее прямого хода.
+    let speed = vel.length();
+    if speed > 1.0 {
+        vel /= speed;
+    }
+    vel * MOVE_SPEED
+}
+
+/// Пересекается ли тело с боксом по вертикали и горизонтали.
+fn body_overlaps(a: &Aabb, pos: Vec3, radius: f32, height: f32) -> bool {
+    let body_min_y = pos.y;
+    let body_max_y = pos.y + height;
+    let box_min_y = a.center.y - a.half_extents.y;
+    let box_max_y = a.center.y + a.half_extents.y;
+    if box_max_y <= body_min_y || box_min_y >= body_max_y {
+        return false;
+    }
+    let reach = radius;
+    (pos.x + reach > a.center.x - a.half_extents.x)
+        && (pos.x - reach < a.center.x + a.half_extents.x)
+        && (pos.z + reach > a.center.z - a.half_extents.z)
+        && (pos.z - reach < a.center.z + a.half_extents.z)
+}
+
+/// Двигает тело по горизонтали, разрешая столкновения по одной оси за шаг.
+///
+/// Разрешение по осям даёт скольжение вдоль стены: игрок, упёршийся в стену
+/// по X, продолжает двигаться по Z. Полноценный солвер здесь не нужен —
+/// карта собрана из осевых блоков, а сервер обязан быть детерминированным.
+pub fn move_horizontal(
+    position: &mut Vec3,
+    dx: f32,
+    dz: f32,
+    bounds: Bounds,
+    obstacles: &[Aabb],
+    radius: f32,
+    height: f32,
+) {
+    if dx != 0.0 {
+        let old_x = position.x;
+        position.x += dx;
+        for a in obstacles {
+            if !body_overlaps(a, *position, radius, height) {
+                continue;
+            }
+            let min_x = a.center.x - a.half_extents.x - radius;
+            let max_x = a.center.x + a.half_extents.x + radius;
+            position.x = if old_x <= min_x {
+                min_x
+            } else if old_x >= max_x {
+                max_x
+            } else if (old_x - min_x).abs() < (max_x - old_x).abs() {
+                min_x
+            } else {
+                max_x
+            };
+        }
+    }
+    if dz != 0.0 {
+        let old_z = position.z;
+        position.z += dz;
+        for a in obstacles {
+            if !body_overlaps(a, *position, radius, height) {
+                continue;
+            }
+            let min_z = a.center.z - a.half_extents.z - radius;
+            let max_z = a.center.z + a.half_extents.z + radius;
+            position.z = if old_z <= min_z {
+                min_z
+            } else if old_z >= max_z {
+                max_z
+            } else if (old_z - min_z).abs() < (max_z - old_z).abs() {
+                min_z
+            } else {
+                max_z
+            };
+        }
+    }
+    *position = bounds.clamp_xz(*position);
+}
+
+/// Один шаг физики тела: гравитация, земля и горизонтальное движение со стенами.
+///
+/// Единственная реализация движения для клиента и сервера. Клиент вызывает её
+/// для предсказания, сервер — в `tick`; расхождение возможно только через
+/// разницу во входных данных, а не через вторую копию арифметики.
+pub fn step_body(
+    position: &mut Vec3,
+    velocity: &mut Vec3,
+    dt: f32,
+    bounds: Bounds,
+    obstacles: &[Aabb],
+    radius: f32,
+    height: f32,
+) {
+    velocity.y -= GRAVITY * dt;
+    position.y += velocity.y * dt;
+    if position.y <= GROUND_Y {
+        position.y = GROUND_Y;
+        velocity.y = 0.0;
+    }
+    move_horizontal(
+        position,
+        velocity.x * dt,
+        velocity.z * dt,
+        bounds,
+        obstacles,
+        radius,
+        height,
+    );
+}
+
 /// Максимальный скачок позиции, который имеет смысл сглаживать, м.
 ///
 /// Респавн и телепорт — это честный прыжок: интерполяция через полкарты
@@ -246,15 +389,6 @@ pub fn lerp_angle(prev: f32, cur: f32, alpha: f32) -> f32 {
     let pi = std::f32::consts::PI;
     let diff = (cur - prev + pi).rem_euclid(std::f32::consts::TAU) - pi;
     prev + diff * a
-}
-
-/// Урон оружия. Неизвестное имя не делает выстрел безвредным.
-pub fn weapon_damage(weapon: &str) -> f32 {
-    match weapon {
-        "rifle" => 35.0,
-        "smg" => 22.0,
-        _ => 20.0,
-    }
 }
 
 /// Зона попадания. Голова — отдельный хитбокс, а не множитель «на глаз».
@@ -382,6 +516,12 @@ pub struct ShotOutcome {
     /// Урон с учётом зоны; `0.0` при промахе. Может превышать остаток
     /// здоровья цели — здоровье клампится в нуль, а не уходит в минус.
     pub damage: f32,
+    /// Тик истории, по которому проверялись цели.
+    pub rewind_tick: u64,
+    /// Запрошенный тик вышел за окно истории и был зажат к краю.
+    /// Это явное поведение: выстрел всё равно проверяется, но сервер
+    /// видит и логирует, что откат неточный.
+    pub rewind_clamped: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -401,8 +541,17 @@ pub struct Player {
     pub level: i32,
     pub currency: i64,
     pub skills: Vec<Skill>,
-    pub equipped_weapon: String,
-    pub equipped_armor: String,
+    /// Id оружия из `items::CATALOG`, а не строка: имя и урон больше не
+    /// дублируются в HUD, сервере и симуляции.
+    pub equipped_weapon: u64,
+    pub equipped_armor: u64,
+    /// Патроны, доступные оружию. Тратится в `apply_shot`.
+    pub ammo: u32,
+    /// Остаток перезарядки, секунды. Сервер уменьшает его в `tick`.
+    pub shot_cooldown: f32,
+    /// Номер последней применённой команды ввода: клиент по нему понимает,
+    /// какие команды сервер уже учёл, и не переигрывает их повторно.
+    pub last_input_seq: u32,
     pub inventory: Inventory,
 }
 
@@ -424,11 +573,25 @@ impl Player {
             level: 1,
             currency: 0,
             skills: Vec::new(),
-            equipped_weapon: "pistol".into(),
-            equipped_armor: "none".into(),
+            equipped_weapon: items::DEFAULT_WEAPON,
+            equipped_armor: 0,
+            ammo: items::START_AMMO,
+            shot_cooldown: 0.0,
+            last_input_seq: 0,
             inventory: Inventory::default(),
         }
     }
+
+    /// Оружие в руках; `None` — предмет не является оружием.
+    pub fn weapon(&self) -> Option<items::WeaponDef> {
+        items::weapon(self.equipped_weapon)
+    }
+
+    /// Может ли игрок выстрелить прямо сейчас.
+    pub fn can_fire(&self) -> bool {
+        self.shot_cooldown <= 0.0 && self.ammo >= self.weapon().map_or(1, |w| w.ammo_per_shot)
+    }
+
     pub fn add_xp(&mut self, amount: i64) {
         self.xp += amount;
         self.level = 1 + (self.xp / 1000) as i32;
@@ -441,10 +604,18 @@ impl Player {
         self.xp = profile.xp;
         self.currency = profile.currency;
         self.position = profile.position;
+        // Выбранное оружие — часть прогресса: иначе каждый вход сбрасывал бы
+        // его на пистолет, а патроны обнулялись бы вместе с ним.
+        self.equipped_weapon = if items::is_weapon(profile.weapon_id) {
+            profile.weapon_id
+        } else {
+            items::DEFAULT_WEAPON
+        };
+        self.ammo = profile.ammo.min(items::MAX_AMMO);
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PlayerState {
     pub id: u64,
     pub name: String,
@@ -457,9 +628,18 @@ pub struct PlayerState {
     pub pitch: f32,
     pub level: i32,
     pub xp: i64,
+    /// Скорость нужна клиенту как начало отсчёта для реплея
+    /// неподтверждённых команд: без неё предсказание расходится после первого
+    /// же попадания в стену.
+    pub velocity: Vec3,
+    pub weapon_id: u64,
+    pub ammo: u32,
+    /// Последняя команда, которую сервер применил. Клиент отбрасывает всё,
+    /// что старше этого номера, и переигрывает только оставшееся.
+    pub last_input_seq: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Anomaly {
     pub id: u64,
     pub position: Vec3,
@@ -468,7 +648,7 @@ pub struct Anomaly {
     pub radiation: f32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Artifact {
     pub id: u64,
     pub position: Vec3,
@@ -476,14 +656,14 @@ pub struct Artifact {
     pub value: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LootItem {
     pub id: u64,
     pub position: Vec3,
     pub item: Item,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Creature {
     pub id: u64,
     pub position: Vec3,
@@ -497,14 +677,14 @@ pub struct Creature {
     pub kind: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExtractionZone {
     pub id: u64,
     pub position: Vec3,
     pub radius: f32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub tick: u64,
     pub players: Vec<PlayerState>,
@@ -521,12 +701,29 @@ pub struct Skill {
     pub level: i32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub id: u64,
     pub name: String,
     pub value: u32,
     pub consumable: bool,
+}
+
+impl Item {
+    /// Предмет по каталогу: лут и награда больше не придумывают имя и цену
+    /// на месте, иначе один и тот же id в инвентаре и на земле выглядел бы
+    /// по-разному.
+    pub fn from_catalog(id: u64) -> Self {
+        let def = items::get(id);
+        Self {
+            id,
+            name: def
+                .map(|d| d.name.to_string())
+                .unwrap_or_else(|| format!("item_{id}")),
+            value: def.map_or(0, |d| d.value),
+            consumable: def.is_some_and(|d| d.consumable),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -542,6 +739,9 @@ pub struct PlayerProfile {
     pub xp: i64,
     pub currency: i64,
     pub position: Vec3,
+    /// Выбранное оружие и остаток патронов переживают выход из рейда.
+    pub weapon_id: u64,
+    pub ammo: u32,
 }
 
 impl PlayerProfile {
@@ -553,6 +753,8 @@ impl PlayerProfile {
             xp: 0,
             currency: 0,
             position: Vec3::ZERO,
+            weapon_id: items::DEFAULT_WEAPON,
+            ammo: items::START_AMMO,
         }
     }
     pub fn add_xp(&mut self, amount: i64) {
@@ -561,7 +763,7 @@ impl PlayerProfile {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InventoryItem {
     pub item_id: i64,
     pub quantity: i32,
@@ -638,6 +840,21 @@ pub struct SimWorld {
     pub next_loot_id: u64,
     /// Границы карты; задаются зоной, а не кодом.
     pub bounds: Bounds,
+    /// Статические стены карты. Раньше они нужны были только рейкасту, и
+    /// игрок проходил сквозь них; теперь это ещё и коллизии движения.
+    pub obstacles: Vec<Aabb>,
+    /// Последняя команда ввода на игрока, ждущая ближайшего тика.
+    ///
+    /// Применять ввод прямо в обработчике пакета значило бы, что при двух
+    /// пакетах за тик сервер двигает игрока дважды, а клиент предсказывает
+    /// иначе. Один вход на тик делает реплей детерминированным.
+    pub queued_inputs: HashMap<u64, InputCommand>,
+    /// Короткая история позиций целей для компенсации лага.
+    ///
+    /// Ключ — id игрока или существа, значение — кольцо `(tick, position)`.
+    /// Размер ограничен `LAG_HISTORY_TICKS` на сущность; мёртвые сущности
+    /// вычищаются при записи, поэтому память не растёт с числом смертей.
+    pub position_history: HashMap<u64, VecDeque<(u64, Vec3)>>,
     /// Шаблоны существ из карты — нужны, чтобы возрождать убитых.
     pub creature_spawns: Vec<CreatureSpawn>,
     /// Точка появления игрока; берётся из карты.
@@ -679,6 +896,11 @@ impl SimWorld {
     }
     pub fn remove_player(&mut self, id: u64) {
         self.players.retain(|p| p.id != id);
+        // Таймер эвакуации и очередь ввода не должны пережить игрока: иначе
+        // после возвращения в рейд сработает чужой прогресс или старый вход.
+        self.extraction_timers.remove(&id);
+        self.queued_inputs.remove(&id);
+        self.position_history.remove(&id);
     }
     pub fn get_player(&self, id: u64) -> Option<&Player> {
         self.players.iter().find(|p| p.id == id)
@@ -703,31 +925,48 @@ impl SimWorld {
         }
     }
 
-    /// Выкладывает инвентарь игрока на землю в точке смерти и очищает его.
+    /// Выкладывает лут и расходники игрока на землю в точке смерти.
+    ///
+    /// Снаряжение (надетое оружие и броня) остаётся у игрока: в открытом мире
+    /// смерть стоит добычи, но не возможности вернуться в рейд. Каждая единица
+    /// становится отдельным лутом — раньше стек из двух аптечек превращался
+    /// в одну, и вторая исчезала.
     ///
     /// Вызывать строго до респауна: позиция берётся у ещё не перемещённого
     /// игрока, иначе весь лут окажется в начале координат. Id выдаются из
     /// `next_loot_id`, поэтому кучи разных смертей не конфликтуют.
     pub fn drop_inventory_at(&mut self, player_id: u64, pos: Vec3) -> Vec<Item> {
-        let inventory = match self.get_player_mut(player_id) {
-            Some(p) => std::mem::take(&mut p.inventory),
+        let (equipped, inventory) = match self.get_player_mut(player_id) {
+            Some(p) => (p.equipped_weapon, std::mem::take(&mut p.inventory)),
             None => return Vec::new(),
         };
+        let mut kept = Inventory::default();
         let mut dropped = Vec::new();
         for it in inventory.items {
-            let item = Item {
-                id: it.item_id as u64,
-                name: format!("item_{}", it.item_id),
-                value: 10,
-                consumable: true,
+            let id = it.item_id.max(0) as u64;
+            // Надетое оружие и броня — снаряжение, а не добыча.
+            let equipped_here = id == equipped && items::is_weapon(id);
+            let keep = if equipped_here || id == items::LIGHT_ARMOR {
+                1
+            } else {
+                0
             };
-            self.loot.push(LootItem {
-                id: self.next_loot_id,
-                position: pos,
-                item: item.clone(),
-            });
-            self.next_loot_id += 1;
-            dropped.push(item);
+            if keep > 0 {
+                kept.add_item(it.item_id, keep);
+            }
+            for _ in 0..(it.quantity - keep).max(0) {
+                let item = Item::from_catalog(id);
+                self.loot.push(LootItem {
+                    id: self.next_loot_id,
+                    position: pos,
+                    item: item.clone(),
+                });
+                self.next_loot_id += 1;
+                dropped.push(item);
+            }
+        }
+        if let Some(p) = self.get_player_mut(player_id) {
+            p.inventory = kept;
         }
         dropped
     }
@@ -754,32 +993,53 @@ impl SimWorld {
     /// неограниченный вектор движения разгонял игрока до сотен метров в секунду.
     /// Некорректная команда отбрасывается целиком, а не применяется частично.
     pub fn apply_input(&mut self, player_id: u64, cmd: &InputCommand) {
-        if !cmd.yaw.is_finite()
-            || !cmd.pitch.is_finite()
-            || !cmd.move_x.is_finite()
-            || !cmd.move_z.is_finite()
-        {
+        if !input_is_finite(cmd) {
             log::debug!("rejected non-finite input from player {player_id}: {cmd:?}");
             return;
         }
         let Some(p) = self.get_player_mut(player_id) else {
             return;
         };
+        // `seq` монотонен на клиенте: команда, пришедшая с опозданием, не
+        // должна откатывать уже применённое состояние и ломать ack.
+        if cmd.seq < p.last_input_seq {
+            return;
+        }
         p.yaw = cmd.yaw;
         p.pitch = cmd
             .pitch
             .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
-        let forward = Vec3::new(cmd.yaw.cos(), 0.0, cmd.yaw.sin());
-        let right = Vec3::new(forward.z, 0.0, -forward.x);
-        let mut vel = forward * (-cmd.move_z) + right * cmd.move_x;
-        // Диагональ не должна быть быстрее прямого хода.
-        let speed = vel.length();
-        if speed > 1.0 {
-            vel /= speed;
-        }
-        vel *= MOVE_SPEED;
+        let vel = desired_velocity(cmd.yaw, cmd.move_x, cmd.move_z);
         p.velocity.x = vel.x;
         p.velocity.z = vel.z;
+        p.last_input_seq = cmd.seq;
+    }
+
+    /// Кладёт команду в очередь ближайшего тика.
+    ///
+    /// Очередь хранит только последнюю команду: более старые уже не нужны,
+    /// если сервер не успел их применить, — важно лишь итоговое направление.
+    /// Команда не применяется здесь, иначе клиент и сервер расходились бы
+    /// на числе пакетов, пришедших между тиками.
+    pub fn queue_input(&mut self, player_id: u64, cmd: &InputCommand) {
+        if !input_is_finite(cmd) {
+            log::debug!("rejected non-finite input from player {player_id}: {cmd:?}");
+            return;
+        }
+        if self.get_player(player_id).is_none() {
+            return;
+        }
+        self.queued_inputs.insert(player_id, cmd.clone());
+    }
+
+    fn apply_queued_inputs(&mut self) {
+        if self.queued_inputs.is_empty() {
+            return;
+        }
+        let queued = std::mem::take(&mut self.queued_inputs);
+        for (pid, cmd) in queued {
+            self.apply_input(pid, &cmd);
+        }
     }
     /// Разрешает выстрел. `None` — выстрел отклонён (чужая точка, мусорный вектор).
     ///
@@ -787,25 +1047,119 @@ impl SimWorld {
     /// damage, death, loot, XP» иначе держалось бы на честном слове. Смерть
     /// игрока на месте не обрабатывается: здоровье падает, а лут и `PlayerDeath`
     /// выдаёт `tick`, иначе награда задвоилась бы.
-    pub fn apply_shot(
+    /// Сколько тиков истории хранится на сущность. 60 при 60 Гц — одна
+    /// секунда: с запасом больше любого разумного RTT/2.
+    pub const LAG_HISTORY_TICKS: usize = 60;
+
+    /// Записывает текущие позиции целей в кольцо истории.
+    ///
+    /// Вызывается в конце тика, после движения и респавнов. Снимки берутся
+    /// одним проходом: иначе заимствование `self` не даст писать в историю.
+    pub fn record_history(&mut self) {
+        let tick = self.tick;
+        let samples: Vec<(u64, Vec3)> = self
+            .players
+            .iter()
+            .map(|p| (p.id, p.position))
+            .chain(self.creatures.iter().map(|c| (c.id, c.position)))
+            .collect();
+        for (id, position) in samples {
+            let ring = self.position_history.entry(id).or_default();
+            if ring.back().is_none_or(|(t, _)| *t != tick) {
+                ring.push_back((tick, position));
+            }
+            while ring.len() > Self::LAG_HISTORY_TICKS {
+                ring.pop_front();
+            }
+        }
+        // Мёртвые и вышедшие сущности не должны оставлять за собой кольца.
+        self.position_history.retain(|id, _| {
+            self.players.iter().any(|p| p.id == *id) || self.creatures.iter().any(|c| c.id == *id)
+        });
+    }
+
+    /// Зажимает запрошенный тик к доступному окну истории.
+    ///
+    /// Возвращает `(tick, clamped)`. Пустая история — это `(self.tick, true)`:
+    /// проверка идёт по текущим позициям, и вызывающий видит, что отката не
+    /// было. Так выстрел не пропадает молча и не выдаёт себя за точный.
+    pub fn clamp_history_tick(&self, requested: u64) -> (u64, bool) {
+        let oldest = self
+            .position_history
+            .values()
+            .filter_map(|ring| ring.front().map(|(tick, _)| *tick))
+            .min();
+        let Some(oldest) = oldest else {
+            return (self.tick, requested != self.tick);
+        };
+        let clamped = requested < oldest || requested > self.tick;
+        (requested.clamp(oldest, self.tick), clamped)
+    }
+
+    /// Позиция сущности на указанном тике: последний снимок не позже него.
+    fn position_at(&self, id: u64, tick: u64, current: Vec3) -> Vec3 {
+        // Нулевой откат всегда означает текущий кадр: иначе последний
+        // записанный тик (self.tick - 1) считался бы историей и «без отката»
+        // на самом деле стрелял бы в прошлое.
+        if tick >= self.tick {
+            return current;
+        }
+        let Some(ring) = self.position_history.get(&id) else {
+            return current;
+        };
+        ring.iter()
+            .rev()
+            .find(|(sample_tick, _)| *sample_tick <= tick)
+            .map(|(_, position)| *position)
+            .or_else(|| ring.front().map(|(_, position)| *position))
+            .unwrap_or(current)
+    }
+
+    pub fn apply_shot(&mut self, shooter: u64, origin: Vec3, dir: Vec3) -> Option<ShotOutcome> {
+        self.apply_shot_rewound(shooter, origin, dir, 0)
+    }
+
+    /// Разрешает выстрел с откатом целей на `rewind_ticks` назад.
+    ///
+    /// Откат применяется только к позициям целей; здоровье, стены и расход
+    /// патронов остаются текущими. Если истории нет или она короче запроса,
+    /// тик зажимается, а `ShotOutcome.rewind_clamped` говорит об этом явно.
+    pub fn apply_shot_rewound(
         &mut self,
         shooter: u64,
         origin: Vec3,
         dir: Vec3,
-        obstacles: &[Aabb],
+        rewind_ticks: u32,
     ) -> Option<ShotOutcome> {
         if !origin.is_finite() || !dir.is_finite() {
             return None;
         }
-        let eye = self.get_player(shooter)?.position + Vec3::Y * EYE_HEIGHT;
+        let (eye, weapon) = {
+            let p = self.get_player(shooter)?;
+            // Темп стрельбы — свойство оружия. Без этой проверки автоклик
+            // выдавал любое число выстрелов в секунду.
+            let weapon = p.weapon()?;
+            if !p.can_fire() {
+                return None;
+            }
+            (p.position + Vec3::Y * EYE_HEIGHT, weapon)
+        };
         if (origin - eye).length() > SHOT_ORIGIN_TOLERANCE || dir.length() < 0.1 {
             return None;
         }
         let d = dir.normalize();
+        let (target_tick, rewind_clamped) =
+            self.clamp_history_tick(self.tick.saturating_sub(rewind_ticks as u64));
+
+        // Выстрел принят: патрон и задержка списываются даже при промахе.
+        if let Some(p) = self.get_player_mut(shooter) {
+            p.ammo = p.ammo.saturating_sub(weapon.ammo_per_shot);
+            p.shot_cooldown = weapon.cooldown_secs;
+        }
 
         // Стена ближе цели делает выстрел промахом.
         let mut wall = SHOT_RANGE;
-        for b in obstacles {
+        for b in &self.obstacles {
             if let Some(t) = ray_aabb(origin, d, wall, b) {
                 wall = t;
             }
@@ -816,8 +1170,9 @@ impl SimWorld {
             if p.id == shooter {
                 continue;
             }
+            let target_position = self.position_at(p.id, target_tick, p.position);
             for (b, zone) in hitboxes(
-                p.position,
+                target_position,
                 PLAYER_HALF_WIDTH,
                 PLAYER_HEIGHT,
                 PLAYER_HEAD_HEIGHT,
@@ -830,8 +1185,9 @@ impl SimWorld {
             }
         }
         for (i, c) in self.creatures.iter().enumerate() {
+            let target_position = self.position_at(c.id, target_tick, c.position);
             for (b, zone) in hitboxes(
-                c.position,
+                target_position,
                 CREATURE_HALF_WIDTH,
                 CREATURE_HEIGHT,
                 CREATURE_HEAD_HEIGHT,
@@ -850,13 +1206,12 @@ impl SimWorld {
                 killed: false,
                 zone: None,
                 damage: 0.0,
+                rewind_tick: target_tick,
+                rewind_clamped,
             });
         };
 
-        let damage = self
-            .get_player(shooter)
-            .map(|p| weapon_damage(&p.equipped_weapon) * zone.multiplier())
-            .unwrap_or(0.0);
+        let damage = weapon.damage * zone.multiplier();
 
         // Индексы взяты из того же состояния, по которому шёл поиск.
         let killed = if let Some(i) = creature_idx {
@@ -890,28 +1245,30 @@ impl SimWorld {
             killed,
             zone: Some(zone),
             damage,
+            rewind_tick: target_tick,
+            rewind_clamped,
         })
     }
     pub fn tick(&mut self, dt: f32) {
         // События НЕ чистятся здесь: выстрел может прийти между тиками, и его
         // `CreatureKilled` было бы стёрто до того, как сервер его заберёт.
         // Забирает их `SimWorld::take_events`; переполнение ограничено ниже.
+        // Один вход на тик: клиент предсказывает ровно один шаг на команду.
+        self.apply_queued_inputs();
         let bounds = self.bounds;
         // players
         let mut dead_players: Vec<u64> = Vec::new();
         for p in self.players.iter_mut() {
-            // gravity
-            p.velocity.y -= 9.81 * dt;
-            let new_y = p.position.y + p.velocity.y * dt;
-            if new_y <= 0.8 {
-                p.position.y = 0.8;
-                p.velocity.y = 0.0;
-            } else {
-                p.position.y = new_y;
-            }
-            p.position.x += p.velocity.x * dt;
-            p.position.z += p.velocity.z * dt;
-            p.position = bounds.clamp_xz(p.position);
+            p.shot_cooldown = (p.shot_cooldown - dt).max(0.0);
+            step_body(
+                &mut p.position,
+                &mut p.velocity,
+                dt,
+                bounds,
+                &self.obstacles,
+                PLAYER_HALF_WIDTH,
+                PLAYER_HEIGHT,
+            );
 
             // survival decay
             p.hunger = (p.hunger - 0.5 * dt).max(0.0);
@@ -988,10 +1345,19 @@ impl SimWorld {
                         } else if d > 30.0 {
                             c.state = CreatureState::Patrol;
                         } else {
-                            // move toward player
+                            // move toward player; стены общие с игроком
                             if let Some(p) = self.players.iter().find(|pl| pl.id == pid) {
                                 let dir = (p.position - c.position).normalize_or_zero();
-                                c.position += dir * 3.0 * dt;
+                                let delta = dir * 3.0 * dt;
+                                move_horizontal(
+                                    &mut c.position,
+                                    delta.x,
+                                    delta.z,
+                                    bounds,
+                                    &self.obstacles,
+                                    CREATURE_HALF_WIDTH,
+                                    CREATURE_HEIGHT,
+                                );
                             }
                         }
                     }
@@ -1110,6 +1476,7 @@ impl SimWorld {
             self.events.drain(0..excess);
         }
 
+        self.record_history();
         self.tick += 1;
     }
 
@@ -1131,6 +1498,10 @@ impl SimWorld {
                     pitch: p.pitch,
                     level: p.level,
                     xp: p.xp,
+                    velocity: p.velocity,
+                    weapon_id: p.equipped_weapon,
+                    ammo: p.ammo,
+                    last_input_seq: p.last_input_seq,
                 })
                 .collect(),
             anomalies: self.anomalies.clone(),
@@ -1278,10 +1649,38 @@ mod tests {
 
         let pos = Vec3::new(7.0, 0.5, -3.0);
         let dropped = w.drop_inventory_at(1, pos);
-        assert_eq!(dropped.len(), 1);
-        assert_eq!(w.loot.len(), 1);
-        assert_eq!(w.loot[0].position, pos);
+        assert_eq!(dropped.len(), 2, "каждая единица стека выпадает отдельно");
+        assert_eq!(w.loot.len(), 2);
+        assert!(w.loot.iter().all(|l| l.position == pos));
         assert!(w.get_player(1).unwrap().inventory.items.is_empty());
+    }
+
+    #[test]
+    fn equipment_survives_death() {
+        let mut w = SimWorld::new();
+        let mut p = Player::new(1, "p");
+        p.equipped_weapon = items::RIFLE;
+        p.inventory.add_item(items::RIFLE as i64, 1);
+        p.inventory.add_item(items::LIGHT_ARMOR as i64, 1);
+        p.inventory.add_item(items::MEDKIT as i64, 2);
+        p.inventory.add_item(items::AMMO as i64, 1);
+        w.add_player(p);
+
+        let dropped = w.drop_inventory_at(1, Vec3::ZERO);
+
+        let inv = &w.get_player(1).unwrap().inventory;
+        assert!(inv.has_item(items::RIFLE as i64, 1), "оружие остаётся");
+        assert!(inv.has_item(items::LIGHT_ARMOR as i64, 1), "броня остаётся");
+        assert!(
+            !inv.has_item(items::MEDKIT as i64, 1),
+            "расходники теряются"
+        );
+        assert!(
+            !inv.has_item(items::AMMO as i64, 1),
+            "патроны-предмет теряются"
+        );
+        assert_eq!(dropped.len(), 3, "2 аптечки + 1 пачка патронов");
+        assert_eq!(w.loot.len(), 3);
     }
 
     #[test]
@@ -1486,7 +1885,228 @@ mod tests {
         assert_eq!(w.creatures[0].kind, "snork");
         assert!(w.respawns.is_empty(), "очередь должна опустеть");
     }
+
+    fn command(seq: u32, move_x: f32, move_z: f32) -> InputCommand {
+        InputCommand {
+            seq,
+            yaw: 0.0,
+            pitch: 0.0,
+            move_x,
+            move_z,
+            dt: 1.0 / 60.0,
+        }
+    }
+
+    #[test]
+    fn input_ack_ignores_stale_sequences() {
+        let mut w = SimWorld::new();
+        w.add_player(Player::new(1, "p"));
+
+        w.apply_input(1, &command(5, 0.0, 0.0));
+        assert_eq!(w.get_player(1).unwrap().last_input_seq, 5);
+
+        // Опоздавшая команда не должна откатывать ack и менять скорость.
+        w.apply_input(1, &command(4, 1.0, 0.0));
+        let p = w.get_player(1).unwrap();
+        assert_eq!(p.last_input_seq, 5);
+        assert_eq!(p.velocity.x, 0.0);
+        assert_eq!(p.velocity.z, 0.0);
+    }
+
+    #[test]
+    fn queued_input_is_applied_on_tick() {
+        let mut w = SimWorld::new();
+        let mut p = Player::new(1, "p");
+        p.position = Vec3::new(0.0, GROUND_Y, 0.0);
+        w.add_player(p);
+
+        w.queue_input(1, &command(1, 0.0, -1.0));
+        assert_eq!(
+            w.get_player(1).unwrap().velocity.x,
+            0.0,
+            "очередь не двигает игрока до тика"
+        );
+
+        w.tick(1.0 / 60.0);
+        let p = w.get_player(1).unwrap();
+        assert_eq!(p.last_input_seq, 1);
+        assert!(p.position.x > 0.0, "игрок должен двинуться по +X");
+    }
+
+    #[test]
+    fn wall_blocks_movement_and_allows_sliding() {
+        let mut w = SimWorld::new();
+        let mut p = Player::new(1, "p");
+        p.position = Vec3::new(0.0, GROUND_Y, 0.0);
+        w.add_player(p);
+        // Стена x = 1..2, достаточно высокая, чтобы пересечься с телом.
+        w.obstacles.push(Aabb::new(
+            Vec3::new(1.5, 1.0, 0.0),
+            Vec3::new(0.5, 1.0, 5.0),
+        ));
+
+        w.queue_input(1, &command(1, 0.0, -1.0));
+        for _ in 0..120 {
+            w.queue_input(1, &command(1, 0.0, -1.0));
+            w.tick(1.0 / 60.0);
+        }
+        let p = w.get_player(1).unwrap();
+        let stop = 1.0 - PLAYER_HALF_WIDTH;
+        assert!(
+            p.position.x <= stop + 1e-3,
+            "x={} прошёл сквозь стену",
+            p.position.x
+        );
+        assert!(
+            p.position.x > stop - 0.1,
+            "игрок не дошёл до стены: {}",
+            p.position.x
+        );
+
+        // Вдоль стены движение сохраняется: блокируется только ось X.
+        w.queue_input(1, &command(2, 1.0, 0.0));
+        w.tick(1.0 / 60.0);
+        let p = w.get_player(1).unwrap();
+        assert!(
+            p.position.z < -0.01,
+            "скольжение по Z не работает: {:?}",
+            p.position
+        );
+        assert!(
+            (p.position.x - stop).abs() < 1e-2,
+            "x сместился: {}",
+            p.position.x
+        );
+    }
+
+    #[test]
+    fn shot_cooldown_limits_fire_rate() {
+        let mut w = SimWorld::new();
+        w.add_player(Player::new(1, "p"));
+
+        assert!(
+            w.apply_shot(1, Vec3::new(0.0, EYE_HEIGHT, 0.0), Vec3::Z)
+                .is_some()
+        );
+        assert!(
+            w.apply_shot(1, Vec3::new(0.0, EYE_HEIGHT, 0.0), Vec3::Z)
+                .is_none(),
+            "второй выстрел внутри кулдауна должен отклоняться"
+        );
+
+        w.tick(0.3);
+        assert!(
+            w.apply_shot(1, Vec3::new(0.0, EYE_HEIGHT, 0.0), Vec3::Z)
+                .is_some(),
+            "после кулдауна выстрел снова разрешён"
+        );
+    }
+
+    #[test]
+    fn shot_spends_ammo_and_stops_when_empty() {
+        let mut w = SimWorld::new();
+        w.add_player(Player::new(1, "p"));
+        let start = w.get_player(1).unwrap().ammo;
+
+        assert!(
+            w.apply_shot(1, Vec3::new(0.0, EYE_HEIGHT, 0.0), Vec3::Z)
+                .is_some()
+        );
+        assert_eq!(w.get_player(1).unwrap().ammo, start - 1);
+
+        w.get_player_mut(1).unwrap().ammo = 0;
+        w.get_player_mut(1).unwrap().shot_cooldown = 0.0;
+        assert!(
+            w.apply_shot(1, Vec3::new(0.0, EYE_HEIGHT, 0.0), Vec3::Z)
+                .is_none(),
+            "без патронов стрелять нельзя"
+        );
+    }
 }
 
 #[cfg(test)]
 mod shot_tests;
+
+#[cfg(test)]
+mod lag_tests {
+    use super::*;
+
+    fn arena() -> (SimWorld, Vec3) {
+        let mut w = SimWorld::new();
+        w.add_player(Player::new(1, "shooter"));
+        let mut victim = Player::new(2, "victim");
+        victim.position = Vec3::new(0.0, 0.8, 3.0);
+        w.add_player(victim);
+        let origin = w.get_player(1).unwrap().position + Vec3::Y * EYE_HEIGHT;
+        (w, origin)
+    }
+
+    #[test]
+    fn firing_without_rewind_misses_moved_target() {
+        let (mut w, origin) = arena();
+        w.tick = 10;
+        w.record_history();
+        w.get_player_mut(2).unwrap().position.x = 2.0;
+        w.tick = 11;
+
+        let outcome = w.apply_shot_rewound(1, origin, Vec3::Z, 0).unwrap();
+        assert_eq!(outcome.hit, None, "по текущей позиции цель уже ушла");
+        assert!(!outcome.rewind_clamped);
+    }
+
+    #[test]
+    fn rewind_hits_target_where_it_was_on_screen() {
+        let (mut w, origin) = arena();
+        w.tick = 10;
+        w.record_history();
+        w.get_player_mut(2).unwrap().position.x = 2.0;
+        w.tick = 11;
+
+        let outcome = w.apply_shot_rewound(1, origin, Vec3::Z, 1).unwrap();
+        assert_eq!(outcome.hit, Some(2), "откат возвращает цель на линию огня");
+        assert_eq!(outcome.rewind_tick, 10);
+        assert!(!outcome.rewind_clamped);
+    }
+
+    #[test]
+    fn stale_and_empty_history_are_explicitly_clamped() {
+        let (mut w, _) = arena();
+        assert_eq!(
+            w.clamp_history_tick(5),
+            (w.tick, true),
+            "без истории откат невозможен, это видно вызывающему"
+        );
+
+        w.tick = 10;
+        w.record_history();
+        w.tick = 100;
+        assert_eq!(
+            w.clamp_history_tick(5),
+            (10, true),
+            "слишком старый тик зажимается к самому старому кадру"
+        );
+        assert_eq!(
+            w.clamp_history_tick(200),
+            (100, true),
+            "будущий тик зажимается к текущему"
+        );
+        assert_eq!(w.clamp_history_tick(100), (100, false));
+    }
+
+    #[test]
+    fn history_is_bounded_per_entity() {
+        let (mut w, _) = arena();
+        for _ in 0..1000 {
+            w.record_history();
+            w.tick += 1;
+        }
+        for ring in w.position_history.values() {
+            assert!(
+                ring.len() <= SimWorld::LAG_HISTORY_TICKS,
+                "кольцо выросло до {}",
+                ring.len()
+            );
+        }
+        assert!(w.position_history.len() <= 2, "история только по живым");
+    }
+}

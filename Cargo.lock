@@ -6703,7 +6703,7 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zn-assets"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "gltf",
@@ -6714,7 +6714,7 @@ dependencies = [
 
 [[package]]
 name = "zn-audio"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "kira",
  "log",
@@ -6723,7 +6723,7 @@ dependencies = [
 
 [[package]]
 name = "zn-client"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -6750,7 +6750,7 @@ dependencies = [
 
 [[package]]
 name = "zn-content"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "glam",
  "log",
@@ -6763,7 +6763,7 @@ dependencies = [
 
 [[package]]
 name = "zn-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "env_logger",
  "hecs",
@@ -6774,7 +6774,7 @@ dependencies = [
 
 [[package]]
 name = "zn-input"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "gilrs",
  "glam",
@@ -6785,7 +6785,7 @@ dependencies = [
 
 [[package]]
 name = "zn-net"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -6798,7 +6798,7 @@ dependencies = [
 
 [[package]]
 name = "zn-physics"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "glam",
  "log",
@@ -6808,7 +6808,7 @@ dependencies = [
 
 [[package]]
 name = "zn-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -6824,7 +6824,7 @@ dependencies = [
 
 [[package]]
 name = "zn-scene"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "glam",
  "log",
@@ -6837,7 +6837,7 @@ dependencies = [
 
 [[package]]
 name = "zn-server"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -6859,7 +6859,7 @@ dependencies = [
 
 [[package]]
 name = "zn-sim"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "glam",
  "log",
@@ -6874,7 +6874,7 @@ dependencies = [
 
 [[package]]
 name = "zn-tools"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bincode",
