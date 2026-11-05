@@ -13,7 +13,7 @@
 
 ## Что это за проект
 
-Extraction-shooter в стиле Stalker/Zone: собственный движок на Rust (wgpu 24, winit 0.30, egui, rapier3d), авторитарный сервер (TCP + UDP), SQLite/Postgres, Electron-лаунчер. 13 крейтов, Rust edition 2024, 128 тестов.
+Extraction-shooter в стиле Stalker/Zone: собственный движок на Rust (wgpu 24, winit 0.30, egui, rapier3d), авторитарный сервер (TCP + UDP), SQLite/Postgres, Electron-лаунчер. 13 крейтов, Rust edition 2024, 144 теста.
 
 - `crates/engine/` — zn-core, zn-render, zn-physics, zn-audio, zn-assets, zn-input, zn-net, zn-scene
 - `crates/game/` — zn-sim (общая симуляция), zn-content
@@ -23,7 +23,7 @@ Extraction-shooter в стиле Stalker/Zone: собственный движо
 ## Расположение
 
 - Каноническая папка с 2026-11-05: `C:\Users\russi\WorkBuddy AI\ai_games\zona_engine` — путь с пробелом, квотировать в shell.
-- Синхронизировано из `E:\zona_engine` 2026-11-05: исходники, `.git`, память агента, `zona.db`, offline-payload; проверены число файлов, сумма байт, `git status` и HEAD `1e9735b`. Кэши `target/` и `launcher/node_modules/` не переносились — восстанавливаются сборкой и `npm install`.
+- Синхронизировано из `E:\zona_engine` 2026-11-05: исходники, `.git`, память агента, `zona.db`, offline-payload; проверены число файлов, сумма байт, `git status` и HEAD `1e9735b` (это HEAD на момент переноса, а не текущий — актуальную историю смотреть в `git log` и `journal/`). Кэши `target/` и `launcher/node_modules/` не переносились — восстанавливаются сборкой и `npm install`.
 - `C:\Users\russi\WorkBuddy AI\Zona_games` — устаревший клон на v0.1.9, не источник правды.
 - `E:\Zona_game` — собранный дистрибутив игры (бинари + ассеты), лежит отдельно от репозитория.
 - Remote: `https://github.com/Otakyooo/zona_engine`, ветка `main`.

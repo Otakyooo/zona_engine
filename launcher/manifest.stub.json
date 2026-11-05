@@ -1,11 +1,11 @@
 {
-  "version": "0.3.0",
+  "version": "0.3.1",
   "files": [
     {
       "path": "zn-client.exe",
       "url": "local:game/zn-client.exe",
-      "sha256": "0e7205b9c5f6e49f071162b63f216902c2330d1157be4e4afc778dec537548e8",
-      "size": 14810112
+      "sha256": "97853201ea3c8887577cf8b34940dc3f67ad6cabd8179bb0a87733b38d8afc5f",
+      "size": 14957056
     }
   ]
 }
