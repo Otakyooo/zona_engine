@@ -10,7 +10,7 @@ jobs:
   build-rust:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -28,20 +28,24 @@ jobs:
   build-launcher:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
         with:
-          node-version: 20
+          node-version: '24'
       - name: Install
         working-directory: launcher
         run: npm ci
+      - name: Audit (prod only)
+        working-directory: launcher
+        continue-on-error: true
+        run: npm audit --omit=dev --audit-level=high
       - name: Build
         working-directory: launcher
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm ci && npm run build -- --publish never
+        run: npm run build -- --publish never
       - name: Upload launcher
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: launcher-dist
           path: launcher/dist
@@ -53,7 +57,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - name: Build release
         run: cargo build --workspace --release
@@ -87,6 +91,6 @@ jobs:
           }
           @{ version = $tag; files = $files } | ConvertTo-Json -Depth 3 | Out-File dist/manifest.json -Encoding utf8
       - name: GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.4
         with:
           files: dist/**
