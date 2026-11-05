@@ -6,34 +6,37 @@
 
 Рабочая папка: `C:\Users\russi\WorkBuddy AI\ai_games\zona_engine` (пробел в пути — квотировать).
 
-```bash
+Основной вариант — **PowerShell** (в bash / Git Bash вместо строки с `$env` используйте `export CARGO_INCREMENTAL=0`; команда `export` в PowerShell не существует):
+
+```powershell
 cd "C:\Users\russi\WorkBuddy AI\ai_games\zona_engine"
-export CARGO_INCREMENTAL=0          # bash / Git Bash
+$env:CARGO_INCREMENTAL = '0'
 ```
 
-PowerShell: `$env:CARGO_INCREMENTAL='0'`.
-`DATABASE_URL` указывать необязательно — по умолчанию SQLite (`AGENTS.md:26`).
+`DATABASE_URL` указывать необязательно — по умолчанию SQLite (`AGENTS.md:26`). Переменная действует только в текущем окне: для клиента во втором окне задайте её снова.
 
 ## Запуск
 
-Сервер (TCP 7777 / UDP 7778):
+Сервер (TCP 7777 / UDP 7778) — запустите в первом окне PowerShell и оставьте его работать:
 
-```bash
+```powershell
 cargo run -p zn-server -- --bind 127.0.0.1 --port 7777
 ```
 
-Клиент из исходников (протокол 8):
+Клиент из исходников (протокол 8) — **во втором окне PowerShell**, снова задав переменную окружения. Замените `Password123` на свой пароль: в PowerShell 5.1 угловые скобки `<пароль>` недопустимы («operator is reserved»).
 
-```bash
+```powershell
+cd "C:\Users\russi\WorkBuddy AI\ai_games\zona_engine"
+$env:CARGO_INCREMENTAL = '0'
 # первый запуск — зарегистрировать пользователя
-cargo run -p zn-client -- --server 127.0.0.1 --port 7777 --username tester --password <пароль> --register
+cargo run -p zn-client -- --server 127.0.0.1 --port 7777 --username tester --password Password123 --register
 # последующие запуски — без --register
-cargo run -p zn-client -- --server 127.0.0.1 --port 7777 --username tester --password <пароль>
+cargo run -p zn-client -- --server 127.0.0.1 --port 7777 --username tester --password Password123
 ```
 
 Флаги клиента (`crates/zn-client/src/main.rs:43-61`): `--scene`, `--token`, `--username`, `--password`, `--telemetry`, `--register`, `--server` (по умолчанию `127.0.0.1`), `--port` (7777). Флаги сервера (`crates/zn-server/src/main.rs:10-19`): `--bind` (0.0.0.0), `--port` (7777), `--map` (`maps/arena.ron`).
 
-Лаунчер (альтернатива): снять `ELECTRON_RUN_AS_NODE` (`Remove-Item Env:ELECTRON_RUN_AS_NODE` в PowerShell), затем `cd launcher && npm start`. Адрес сервера по умолчанию `192.168.0.47` (`README.md:8`) — переопределить на `127.0.0.1`.
+Лаунчер (альтернатива): снять `ELECTRON_RUN_AS_NODE` (`Remove-Item Env:ELECTRON_RUN_AS_NODE`), затем двумя отдельными командами — `cd launcher` и `npm start` (`&&` в PowerShell 5.1 не работает). Адрес сервера по умолчанию `192.168.0.47` (`README.md:8`) — переопределить на `127.0.0.1`.
 
 ## Что проверить
 
