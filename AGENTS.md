@@ -68,7 +68,7 @@ For a release update (only when explicitly requested by user):
 - Canonical root: `C:\Users\russi\WorkBuddy AI\ai_games\zona_engine` (path contains a space — quote it in shell commands).
 - Synced from `E:\zona_engine` on 2026-11-05: sources, `.git`, agent memory, `zona.db` and the offline payload were copied and verified (file count, byte total, git status and HEAD all match). Build caches `target/` and `launcher/node_modules/` were intentionally left behind — regenerate with `cargo build` and `npm install`.
 - `C:\Users\russi\WorkBuddy AI\Zona_games` is a stale clone frozen at v0.1.9 — never use it as the source of truth.
-- `E:\zona_engine` is the former working copy: the synced tree was verified, but automated removal was blocked by the host security policy (Add-Type is disallowed). It still exists on disk — remove it manually via Explorer (Send to Recycle Bin) when convenient.
+- `E:\zona_engine` was the former working copy: the synced tree was verified, then the owner removed it manually on 2026-11-05 (automated removal was blocked by the host security policy on `Add-Type`). The folder no longer exists on disk; no action needed.
 - Durable agent notes live in `.workbuddy-ai/memory/` (tracked in git).
 - Old release artifacts and closed plans are archived under `.workbuddy-ai/archive/` and `.kilo/plans/archive/`.
 - Do not set a global `CARGO_TARGET_DIR`: CI expects the relative `target/` directory.
