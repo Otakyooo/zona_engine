@@ -219,6 +219,9 @@ mod tests {
                 item_id: zn_sim::ids::ARTIFACT_BASE as i64 + 3,
                 quantity: 1,
                 slot: 0,
+                x: 0,
+                y: 0,
+                rotated: false,
             }],
         };
         assert!(format_inventory(&inv).contains("Artifact 3"));

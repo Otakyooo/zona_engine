@@ -41,7 +41,12 @@ pub mod ids {
     }
 }
 
+mod inventory;
 pub mod items;
+pub use inventory::{
+    Inventory, InventoryItem, ItemContainer, RAID_GRID_H, RAID_GRID_W, STASH_GRID_H, STASH_GRID_W,
+    add_to_items, can_place, cells_for, find_spot, move_in_items, normalize_items, take_from_items,
+};
 
 /// Горизонтальная скорость игрока, м/с.
 const MOVE_SPEED: f32 = 5.0;
@@ -763,50 +768,6 @@ impl PlayerProfile {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InventoryItem {
-    pub item_id: i64,
-    pub quantity: i32,
-    pub slot: i32,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Inventory {
-    pub items: Vec<InventoryItem>,
-}
-
-impl Inventory {
-    pub fn add_item(&mut self, item_id: i64, quantity: i32) {
-        if let Some(it) = self.items.iter_mut().find(|i| i.item_id == item_id) {
-            it.quantity += quantity;
-        } else {
-            let slot = self.items.len() as i32;
-            self.items.push(InventoryItem {
-                item_id,
-                quantity,
-                slot,
-            });
-        }
-    }
-    pub fn remove_item(&mut self, item_id: i64, quantity: i32) -> bool {
-        if let Some(it) = self.items.iter_mut().find(|i| i.item_id == item_id)
-            && it.quantity >= quantity
-        {
-            it.quantity -= quantity;
-            if it.quantity <= 0 {
-                self.items.retain(|i| i.item_id != item_id);
-            }
-            return true;
-        }
-        false
-    }
-    pub fn has_item(&self, item_id: i64, quantity: i32) -> bool {
-        self.items
-            .iter()
-            .any(|i| i.item_id == item_id && i.quantity >= quantity)
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum GameEvent {
     PlayerDeath {
@@ -951,9 +912,13 @@ impl SimWorld {
             } else {
                 0
             };
-            if keep > 0 {
-                kept.add_item(it.item_id, keep);
-            }
+            // Если сетка не приняла снаряжение, единица должна выпасть лутом,
+            // а не исчезнуть: иначе смерть на полном инвентаре стирает вещь.
+            let keep = if keep > 0 && kept.add_item(it.item_id, keep) {
+                keep
+            } else {
+                0
+            };
             for _ in 0..(it.quantity - keep).max(0) {
                 let item = Item::from_catalog(id);
                 self.loot.push(LootItem {
@@ -1681,6 +1646,32 @@ mod tests {
         );
         assert_eq!(dropped.len(), 3, "2 аптечки + 1 пачка патронов");
         assert_eq!(w.loot.len(), 3);
+    }
+
+    #[test]
+    fn full_grid_keeps_or_drops_every_unit() {
+        let mut w = SimWorld::new();
+        let mut p = Player::new(1, "p");
+        // 57 предметов по 1×1 + винтовка 3×1 = все 60 клеток рюкзака.
+        for i in 0..57 {
+            assert!(p.inventory.add_item(10_000 + i, 1));
+        }
+        assert!(p.inventory.add_item(items::RIFLE as i64, 1));
+        assert_eq!(p.inventory.used_cells(), Inventory::capacity_cells());
+        p.equipped_weapon = items::RIFLE;
+        w.add_player(p);
+
+        let dropped = w.drop_inventory_at(1, Vec3::ZERO);
+
+        let inv = &w.get_player(1).unwrap().inventory;
+        assert!(inv.has_item(items::RIFLE as i64, 1), "оружие остаётся");
+        let kept: i32 = inv.items.iter().map(|it| it.quantity).sum();
+        assert_eq!(
+            dropped.len() as i32 + kept,
+            58,
+            "ни одна единица не должна исчезнуть при смерти"
+        );
+        assert_eq!(w.loot.len(), dropped.len());
     }
 
     #[test]

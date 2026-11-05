@@ -28,9 +28,37 @@ pub struct ItemDef {
     pub id: u64,
     pub name: &'static str,
     pub value: u32,
+    /// Масса в килограммах. Пока только для интерфейса и будущей выносливости.
+    pub weight: f32,
+    /// Размер в клетках инвентаря до поворота.
+    pub grid: GridSize,
     pub consumable: bool,
     pub heal: f32,
     pub weapon: Option<WeaponDef>,
+}
+
+/// Размер предмета на сетке. Поворот меняет местами ширину и высоту.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridSize {
+    pub w: u8,
+    pub h: u8,
+}
+
+impl GridSize {
+    pub const fn new(w: u8, h: u8) -> Self {
+        Self { w, h }
+    }
+
+    pub const fn rotated(self, rotated: bool) -> Self {
+        if rotated {
+            Self {
+                w: self.h,
+                h: self.w,
+            }
+        } else {
+            self
+        }
+    }
 }
 
 impl ItemDef {
@@ -58,6 +86,8 @@ pub const CATALOG: &[ItemDef] = &[
         id: MEDKIT,
         name: "Medkit",
         value: 50,
+        weight: 0.3,
+        grid: GridSize::new(1, 1),
         consumable: true,
         heal: 30.0,
         weapon: None,
@@ -66,6 +96,8 @@ pub const CATALOG: &[ItemDef] = &[
         id: BANDAGE,
         name: "Bandage",
         value: 20,
+        weight: 0.1,
+        grid: GridSize::new(1, 1),
         consumable: true,
         heal: 15.0,
         weapon: None,
@@ -74,6 +106,8 @@ pub const CATALOG: &[ItemDef] = &[
         id: PISTOL,
         name: "PM",
         value: 100,
+        weight: 0.8,
+        grid: GridSize::new(2, 1),
         consumable: false,
         heal: 0.0,
         weapon: Some(WeaponDef {
@@ -88,6 +122,8 @@ pub const CATALOG: &[ItemDef] = &[
         id: SMG,
         name: "SMG",
         value: 250,
+        weight: 2.5,
+        grid: GridSize::new(2, 2),
         consumable: false,
         heal: 0.0,
         weapon: Some(WeaponDef {
@@ -102,6 +138,8 @@ pub const CATALOG: &[ItemDef] = &[
         id: RIFLE,
         name: "Rifle",
         value: 400,
+        weight: 3.4,
+        grid: GridSize::new(3, 1),
         consumable: false,
         heal: 0.0,
         weapon: Some(WeaponDef {
@@ -116,6 +154,8 @@ pub const CATALOG: &[ItemDef] = &[
         id: LIGHT_ARMOR,
         name: "Light armor",
         value: 300,
+        weight: 5.0,
+        grid: GridSize::new(2, 2),
         consumable: false,
         heal: 0.0,
         weapon: None,
@@ -124,6 +164,8 @@ pub const CATALOG: &[ItemDef] = &[
         id: AMMO,
         name: "Ammo",
         value: 2,
+        weight: 0.4,
+        grid: GridSize::new(1, 1),
         consumable: false,
         heal: 0.0,
         weapon: None,
@@ -144,6 +186,15 @@ pub fn name(id: u64) -> &'static str {
 
 pub fn value(id: u64) -> u32 {
     get(id).map(|d| d.value).unwrap_or(0)
+}
+
+pub fn weight(id: u64) -> f32 {
+    get(id).map(|d| d.weight).unwrap_or(0.0)
+}
+
+/// Неизвестные id (например артефакты) занимают одну клетку.
+pub fn grid_size(id: u64) -> GridSize {
+    get(id).map(|d| d.grid).unwrap_or(GridSize::new(1, 1))
 }
 
 pub fn heal(id: u64) -> f32 {
@@ -218,5 +269,17 @@ mod tests {
         assert!(is_equipment(LIGHT_ARMOR));
         assert!(!is_equipment(MEDKIT));
         assert!(!is_equipment(AMMO));
+    }
+
+    #[test]
+    fn grid_sizes_are_positive_and_rotate() {
+        for def in CATALOG {
+            assert!(def.grid.w > 0 && def.grid.h > 0, "{} без клеток", def.name);
+            assert!(def.weight > 0.0, "{} без массы", def.name);
+        }
+        let rifle = grid_size(RIFLE);
+        assert_eq!(rifle.rotated(false), rifle);
+        assert_eq!(rifle.rotated(true), GridSize::new(rifle.h, rifle.w));
+        assert_eq!(grid_size(2_000_003), GridSize::new(1, 1));
     }
 }

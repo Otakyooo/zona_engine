@@ -22,10 +22,11 @@ Extraction-shooter в стиле Stalker/Zone: собственный движо
 
 ## Расположение
 
-- Рабочая папка сессии 2026-11-03: `E:\zona_engine2`.
-- Каноническая: `C:\Users\russi\WorkBuddy AI\Zona_games` — путь с пробелом, квотировать в shell.
-- Старый бэкап: `E:\zona_engine`; артефакты оттуда могут содержать зашитый старый `CARGO_MANIFEST_DIR` (см. `PITFALLS.md`).
-- Remote: `https://github.com/Otakyooo/zona_engine`, ветка `main`. История перенесена локальным клоном 2026-10-31.
+- Каноническая папка с 2026-11-05: `C:\Users\russi\WorkBuddy AI\ai_games\zona_engine` — путь с пробелом, квотировать в shell.
+- Синхронизировано из `E:\zona_engine` 2026-11-05: исходники, `.git`, память агента, `zona.db`, offline-payload; проверены число файлов, сумма байт, `git status` и HEAD `1e9735b`. Кэши `target/` и `launcher/node_modules/` не переносились — восстанавливаются сборкой и `npm install`.
+- `C:\Users\russi\WorkBuddy AI\Zona_games` — устаревший клон на v0.1.9, не источник правды.
+- `E:\Zona_game` — собранный дистрибутив игры (бинари + ассеты), лежит отдельно от репозитория.
+- Remote: `https://github.com/Otakyooo/zona_engine`, ветка `main`.
 
 ## Команды
 

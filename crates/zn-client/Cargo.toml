@@ -29,3 +29,5 @@ zn-sim.workspace = true
 glam.workspace = true
 pollster.workspace = true
 bincode.workspace = true
+serde.workspace = true
+ron.workspace = true

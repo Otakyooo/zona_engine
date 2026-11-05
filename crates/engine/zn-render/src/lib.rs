@@ -175,6 +175,10 @@ struct Uniforms {
     _pad_before: [f32; 3],
     _pad1: [f32; 3],
     _pad2: f32,
+    /// Явное выравнивание до 16 байт: в WGSL `vec4` стоит на offset 128,
+    /// а `repr(C)` без этого поля положил бы его на 112 и шейдер прочитал бы
+    /// камеру со сдвигом. Размер всего uniform — 160 байт.
+    _pad_align: [f32; 4],
     _pad4: [f32; 4],
     camera_pos: [f32; 3],
     _pad3: f32,
@@ -213,6 +217,9 @@ pub struct Renderer {
     egui_format: wgpu::TextureFormat,
     stats: RenderStats,
     overflow_warned: bool,
+    /// Режимы презентации, которые умеет поверхность: без этого список
+    /// поддержки терялся после создания конфига, и V-Sync нельзя было вернуть.
+    present_modes: Vec<wgpu::PresentMode>,
 }
 
 /// Кадр интерфейса, подготовленный клиентом.
@@ -487,6 +494,7 @@ impl Renderer {
             egui_format,
             stats: RenderStats::default(),
             overflow_warned: false,
+            present_modes: caps.present_modes.clone(),
         })
     }
 
@@ -516,6 +524,24 @@ impl Renderer {
     /// Статистика последнего кадра — для perf-лога, а не для геймплея.
     pub fn stats(&self) -> RenderStats {
         self.stats
+    }
+
+    /// Включает или выключает вертикальную синхронизацию.
+    ///
+    /// Mailbox предпочтительнее Immediate: драйвер не копит очередь кадров.
+    /// Если поверхность не умеет ни того, ни другого, остаётся Fifo — честно
+    /// возвращаем `false`, чтобы интерфейс не показывал несуществующий режим.
+    pub fn set_vsync(&mut self, enabled: bool) -> bool {
+        let mode = pick_present_mode(&self.present_modes, enabled);
+        if self.config.present_mode != mode {
+            self.config.present_mode = mode;
+            self.surface.configure(&self.device, &self.config);
+        }
+        (mode == wgpu::PresentMode::Fifo) == enabled
+    }
+
+    pub fn vsync(&self) -> bool {
+        self.config.present_mode == wgpu::PresentMode::Fifo
     }
 
     pub fn create_texture(&self, rgba: &[u8], width: u32, height: u32) -> Texture {
@@ -573,7 +599,10 @@ impl Renderer {
             _pad_before: [0.0; 3],
             _pad1: [0.0; 3],
             _pad2: 0.0,
-            _pad4: [0.0; 4],
+            _pad_align: [0.0; 4],
+            // x — дистанция тумана. Она же дальность отрисовки из настроек:
+            // раньше туман был зашит в шейдере и не совпадал с far-плоскостью.
+            _pad4: [camera.far.max(1.0), 0.0, 0.0, 0.0],
             camera_pos: [camera.eye.x, camera.eye.y, camera.eye.z],
             _pad3: 0.0,
         };
@@ -925,6 +954,19 @@ fn create_depth(
     (texture, view)
 }
 
+fn pick_present_mode(supported: &[wgpu::PresentMode], vsync: bool) -> wgpu::PresentMode {
+    if vsync || supported.is_empty() {
+        return wgpu::PresentMode::Fifo;
+    }
+    if supported.contains(&wgpu::PresentMode::Mailbox) {
+        wgpu::PresentMode::Mailbox
+    } else if supported.contains(&wgpu::PresentMode::Immediate) {
+        wgpu::PresentMode::Immediate
+    } else {
+        wgpu::PresentMode::Fifo
+    }
+}
+
 const SHADER: &str = r#"
 struct Uniforms {
     view_proj: mat4x4<f32>,
@@ -934,6 +976,7 @@ struct Uniforms {
     _pad_before: vec3<f32>,
     _pad1: vec3<f32>,
     _pad2: f32,
+    _pad4: vec4<f32>,
     camera_pos: vec3<f32>,
     _pad3: f32,
 }
@@ -978,7 +1021,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let base = in.color * tex.rgb;
     // fog
     let dist = distance(in.world_pos, u.camera_pos);
-    let fog_factor = clamp((60.0 - dist) / 60.0, 0.0, 1.0);
+    let fog_distance = max(u._pad4.x, 1.0);
+    let fog_factor = clamp((fog_distance - dist) / fog_distance, 0.0, 1.0);
     let fog_color = vec3<f32>(0.53, 0.81, 0.92);
     let color = mix(fog_color, base * light, fog_factor);
     return vec4<f32>(color, 1.0);
@@ -1044,5 +1088,27 @@ mod tests {
         let f = Frustum::from_view_proj(camera().view_proj());
         assert!(!f.intersects_aabb(Vec3::new(-1.0, 0.0, -300.0), Vec3::new(1.0, 2.0, -200.0)));
         assert!(!f.intersects_aabb(Vec3::new(40.0, 0.0, -1.0), Vec3::new(42.0, 2.0, 1.0)));
+    }
+
+    #[test]
+    fn present_mode_prefers_mailbox_without_vsync() {
+        let modes = [
+            wgpu::PresentMode::Fifo,
+            wgpu::PresentMode::Mailbox,
+            wgpu::PresentMode::Immediate,
+        ];
+        assert_eq!(pick_present_mode(&modes, true), wgpu::PresentMode::Fifo);
+        assert_eq!(pick_present_mode(&modes, false), wgpu::PresentMode::Mailbox);
+        assert_eq!(
+            pick_present_mode(&[wgpu::PresentMode::Fifo], false),
+            wgpu::PresentMode::Fifo
+        );
+    }
+
+    #[test]
+    fn uniform_layout_matches_wgsl_size() {
+        // WGSL выравнивает vec3/vec4 до 16 байт; без явного padding буфер
+        // меньше ожидаемого и render pass падает на валидации.
+        assert_eq!(std::mem::size_of::<Uniforms>(), 160);
     }
 }

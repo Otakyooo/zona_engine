@@ -6,7 +6,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use zn_sim::{
     Aabb, Anomaly, Artifact, Bounds, Creature, HitZone, InputCommand, Inventory, InventoryItem,
-    LootItem, PlayerProfile, PlayerState, Snapshot,
+    ItemContainer, LootItem, PlayerProfile, PlayerState, Snapshot,
 };
 
 /// Версия игрового протокола.
@@ -14,7 +14,7 @@ use zn_sim::{
 /// Bincode не несёт имён полей: клиент другой сборки либо не разберёт пакет,
 /// либо, что хуже, разберёт его как мусор. Версия едет в `Welcome`, и клиент
 /// обязан сказать об этом вслух, а не искать баг в движении.
-pub const PROTOCOL_VERSION: u16 = 7;
+pub const PROTOCOL_VERSION: u16 = 8;
 
 /// Дельта снапшота: только изменившиеся сущности и списки удалённых.
 ///
@@ -185,9 +185,25 @@ pub enum ClientPacket {
         weapon_id: u64,
     },
     /// Забрать предмет из схрона в рейдовый инвентарь.
+    ///
+    /// Легаси: клиент больше не отправляет этот пакет (перенос идёт через
+    /// `MoveItem`), но вариант сохранён ради стабильности провода: bincode
+    /// кодирует перечисление позиционно, и удаление сдвинуло бы дискриминанты
+    /// следующих пакетов. Удалять только вместе с подъёмом `PROTOCOL_VERSION`.
     TakeFromStash {
         item_id: u64,
         quantity: u32,
+    },
+    /// Перенос предмета между рюкзаком и схроном либо внутри одного
+    /// контейнера. Координаты проверяет сервер: клиентская сетка — только
+    /// отображение, а не разрешение на перемещение.
+    MoveItem {
+        from: ItemContainer,
+        item_id: u64,
+        to: ItemContainer,
+        x: i32,
+        y: i32,
+        rotated: bool,
     },
     /// Начать новый рейд после эвакуации или смерти.
     StartRaid,
@@ -285,6 +301,11 @@ pub enum ServerPacket {
     /// Серверный замер RTT: клиент обязан немедленно ответить `Pong`.
     Ping {
         nonce: u64,
+    },
+    /// Сервер отклонил перенос: клетка занята, предмета нет или контейнер
+    /// недоступен (например, игрок не в рейде).
+    MoveRejected {
+        reason: String,
     },
 }
 
@@ -683,6 +704,31 @@ mod tests {
 
     #[test]
     fn stash_packets_roundtrip() {
+        let moved = bincode::serialize(&ClientPacket::MoveItem {
+            from: ItemContainer::Inventory,
+            item_id: 12,
+            to: ItemContainer::Stash,
+            x: 3,
+            y: 4,
+            rotated: true,
+        })
+        .unwrap();
+        match decode_client(&moved).unwrap() {
+            ClientPacket::MoveItem {
+                from,
+                item_id,
+                to,
+                x,
+                y,
+                rotated,
+            } => {
+                assert_eq!(from, ItemContainer::Inventory);
+                assert_eq!(to, ItemContainer::Stash);
+                assert_eq!((item_id, x, y, rotated), (12, 3, 4, true));
+            }
+            _ => panic!("wrong variant"),
+        }
+
         let take = bincode::serialize(&ClientPacket::TakeFromStash {
             item_id: 11,
             quantity: 1,
@@ -700,6 +746,9 @@ mod tests {
                 item_id: 11,
                 quantity: 1,
                 slot: 0,
+                x: 0,
+                y: 0,
+                rotated: false,
             }],
         })
         .unwrap();
@@ -727,6 +776,9 @@ mod tests {
                 item_id: 1,
                 quantity: 2,
                 slot: 0,
+                x: 0,
+                y: 0,
+                rotated: false,
             }],
             duration_secs: 42,
         };

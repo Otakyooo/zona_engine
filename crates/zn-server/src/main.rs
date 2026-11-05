@@ -26,7 +26,11 @@ use zn_net::{
     ClientPacket, InputRateLimiter, PROTOCOL_VERSION, RaidEndReason, RaidResult, ServerPacket,
     UdpEndpoint, send_packet,
 };
-use zn_sim::{Inventory, InventoryItem, Player, PlayerProfile, SimWorld, items};
+use zn_sim::{
+    Inventory, InventoryItem, ItemContainer, Player, PlayerProfile, RAID_GRID_H, RAID_GRID_W,
+    STASH_GRID_H, STASH_GRID_W, SimWorld, add_to_items, can_place, items, move_in_items,
+    normalize_items, take_from_items,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -311,6 +315,47 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
+                            ClientPacket::MoveItem {
+                                from,
+                                item_id,
+                                to,
+                                x,
+                                y,
+                                rotated,
+                            } => {
+                                if let Some(&pid) = addr_to_client.get(&addr)
+                                    && let Some(&uid) = player_to_user.get(&pid)
+                                {
+                                    if let Err(reason) = move_item(
+                                        &pool,
+                                        &mut world,
+                                        uid,
+                                        pid,
+                                        MoveRequest {
+                                            from,
+                                            item_id,
+                                            to,
+                                            x,
+                                            y,
+                                            rotated,
+                                        },
+                                    )
+                                    .await
+                                        && let Ok(d) = bincode::serialize(
+                                            &ServerPacket::MoveRejected { reason },
+                                        )
+                                    {
+                                        let _ = udp.socket.send_to(&d, addr).await;
+                                    }
+                                    send_inventory(&udp.socket, &world, pid, addr).await;
+                                    let items = load_stash(&pool, uid).await;
+                                    if let Ok(d) = bincode::serialize(&ServerPacket::StashContents {
+                                        items,
+                                    }) {
+                                        let _ = udp.socket.send_to(&d, addr).await;
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -574,6 +619,46 @@ async fn main() -> anyhow::Result<()> {
                         if let Some(w) = writers.get(&conn_id) {
                             let mut g = w.lock().await;
                             let _ = send_packet(&mut *g, &reply).await;
+                        }
+                    }
+                    ClientPacket::MoveItem {
+                        from,
+                        item_id,
+                        to,
+                        x,
+                        y,
+                        rotated,
+                    } => {
+                        let pid = conn_to_player.get(&conn_id).copied().unwrap_or(conn_id);
+                        if let Some(&uid) = player_to_user.get(&pid) {
+                            let result = move_item(
+                                &pool,
+                                &mut world,
+                                uid,
+                                pid,
+                                MoveRequest {
+                                    from,
+                                    item_id,
+                                    to,
+                                    x,
+                                    y,
+                                    rotated,
+                                },
+                            )
+                            .await;
+                            if let Some(addr) = client_addrs.get(&pid).copied() {
+                                send_inventory(&udp.socket, &world, pid, addr).await;
+                            }
+                            if let Some(w) = writers.get(&conn_id) {
+                                let reply = match result {
+                                    Ok(()) => ServerPacket::StashContents {
+                                        items: load_stash(&pool, uid).await,
+                                    },
+                                    Err(reason) => ServerPacket::MoveRejected { reason },
+                                };
+                                let mut g = w.lock().await;
+                                let _ = send_packet(&mut *g, &reply).await;
+                            }
                         }
                     }
                 }
@@ -998,10 +1083,16 @@ fn handle_pickup(world: &mut SimWorld, pid: u64, entity_id: u64) -> bool {
             if (world.loot[idx].position - player_pos).length() > PICKUP_RANGE {
                 return false;
             }
-            let item = world.loot.remove(idx).item;
-            if let Some(p) = world.get_player_mut(pid) {
-                p.inventory.add_item(item.id as i64, 1);
+            let item = world.loot[idx].item.clone();
+            // Сначала проверяем, что предмет помещается: иначе полный рюкзак
+            // удалял бы лут из мира безвозвратно.
+            let placed = world
+                .get_player_mut(pid)
+                .is_some_and(|p| p.inventory.add_item(item.id as i64, 1));
+            if !placed {
+                return false;
             }
+            world.loot.remove(idx);
             log::info!("player {} picked up loot {}", pid, entity_id);
             true
         }
@@ -1013,12 +1104,17 @@ fn handle_pickup(world: &mut SimWorld, pid: u64, entity_id: u64) -> bool {
             if (world.artifacts[idx].position - player_pos).length() > PICKUP_RANGE {
                 return false;
             }
-            let art = world.artifacts.remove(idx);
+            let art = world.artifacts[idx].clone();
+            let item_id = (zn_sim::ids::ARTIFACT_BASE + art.id) as i64;
+            let placed = world
+                .get_player_mut(pid)
+                .is_some_and(|p| p.inventory.add_item(item_id, 1));
+            if !placed {
+                return false;
+            }
+            world.artifacts.remove(idx);
             if let Some(p) = world.get_player_mut(pid) {
                 p.health = (p.health + 20.0).min(p.max_health);
-                // Артефакт живёт в своём диапазоне id, иначе его съедают как аптечку.
-                p.inventory
-                    .add_item((zn_sim::ids::ARTIFACT_BASE + art.id) as i64, 1);
             }
             log::info!("player {} picked up artifact {}", pid, entity_id);
             true
@@ -1152,6 +1248,9 @@ fn handle_events(
                         item_id: item.id as i64,
                         quantity: 1,
                         slot: 0,
+                        x: 0,
+                        y: 0,
+                        rotated: false,
                     })
                     .collect();
                 if let Some(p) = world.get_player(player_id) {
@@ -1407,40 +1506,52 @@ async fn spawn_player(
 /// Содержимое схрона. Отдаётся клиенту целиком, чтобы экран не собирал его
 /// из дельт: после переподключения дельты потеряны.
 async fn load_stash(pool: &SqlitePool, user_id: i64) -> Vec<InventoryItem> {
-    let rows: Vec<(i64, i32)> = sqlx::query_as(
-        "SELECT item_id, quantity FROM stash_items WHERE user_id = ? ORDER BY item_id",
+    let rows: Vec<(i64, i32, i32, i32, i32, bool)> = sqlx::query_as(
+        "SELECT item_id, quantity, slot, x, y, rotated FROM stash_items \
+         WHERE user_id = ? ORDER BY slot, item_id",
     )
     .bind(user_id)
     .fetch_all(pool)
     .await
     .unwrap_or_default();
-    rows.into_iter()
-        .enumerate()
-        .map(|(slot, (item_id, quantity))| InventoryItem {
+    let mut items: Vec<InventoryItem> = rows
+        .into_iter()
+        .map(|(item_id, quantity, slot, x, y, rotated)| InventoryItem {
             item_id,
             quantity,
-            slot: slot as i32,
+            slot,
+            x,
+            y,
+            rotated,
         })
-        .collect()
+        .collect();
+    normalize_items(&mut items, STASH_GRID_W, STASH_GRID_H);
+    items
 }
 
 async fn load_inventory(pool: &SqlitePool, user_id: i64) -> Inventory {
-    let rows: Vec<(i64, i32, i32)> =
-        sqlx::query_as("SELECT item_id, quantity, slot FROM inventory_items WHERE user_id = ?")
-            .bind(user_id)
-            .fetch_all(pool)
-            .await
-            .unwrap_or_default();
-    Inventory {
+    let rows: Vec<(i64, i32, i32, i32, i32, bool)> = sqlx::query_as(
+        "SELECT item_id, quantity, slot, x, y, rotated FROM inventory_items WHERE user_id = ?",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let mut inventory = Inventory {
         items: rows
             .into_iter()
-            .map(|(item_id, quantity, slot)| InventoryItem {
+            .map(|(item_id, quantity, slot, x, y, rotated)| InventoryItem {
                 item_id,
                 quantity,
                 slot,
+                x,
+                y,
+                rotated,
             })
             .collect(),
-    }
+    };
+    inventory.normalize();
+    inventory
 }
 
 async fn save_profile(pool: &SqlitePool, user_id: i64, player: Option<&Player>) {
@@ -1495,12 +1606,16 @@ async fn save_inventory(pool: &SqlitePool, user_id: i64, inv: &Inventory) {
     }
     for it in &inv.items {
         if let Err(e) = sqlx::query(
-            "INSERT INTO inventory_items (user_id, item_id, quantity, slot) VALUES (?, ?, ?, ?)",
+            "INSERT INTO inventory_items (user_id, item_id, quantity, slot, x, y, rotated) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(user_id)
         .bind(it.item_id)
         .bind(it.quantity)
         .bind(it.slot)
+        .bind(it.x)
+        .bind(it.y)
+        .bind(it.rotated)
         .execute(&mut *tx)
         .await
         {
@@ -1534,53 +1649,30 @@ async fn take_from_stash(
     }
     let item_id = item_id as i64;
     let quantity = quantity as i32;
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            log::error!("stash take tx for user {user_id}: {e}");
-            return false;
-        }
-    };
-    let have: Option<i32> =
-        sqlx::query_scalar("SELECT quantity FROM stash_items WHERE user_id = ? AND item_id = ?")
-            .bind(user_id)
-            .bind(item_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .ok()
-            .flatten();
-    let Some(have) = have else {
+    let mut stash = load_stash(pool, user_id).await;
+    let Some(idx) = stash.iter().position(|i| i.item_id == item_id) else {
         return false;
     };
-    if have < quantity {
+    if stash[idx].quantity < quantity {
         return false;
     }
-    let res = if have == quantity {
-        sqlx::query("DELETE FROM stash_items WHERE user_id = ? AND item_id = ?")
-            .bind(user_id)
-            .bind(item_id)
-            .execute(&mut *tx)
-            .await
+    let Some(player) = world.get_player(pid) else {
+        return false;
+    };
+    let mut inventory = player.inventory.clone();
+    if !inventory.add_item(item_id, quantity) {
+        return false;
+    }
+    if stash[idx].quantity == quantity {
+        stash.remove(idx);
     } else {
-        sqlx::query(
-            "UPDATE stash_items SET quantity = quantity - ? WHERE user_id = ? AND item_id = ?",
-        )
-        .bind(quantity)
-        .bind(user_id)
-        .bind(item_id)
-        .execute(&mut *tx)
-        .await
-    };
-    if let Err(e) = res {
-        log::error!("stash take for user {user_id}: {e}");
-        return false;
+        stash[idx].quantity -= quantity;
     }
-    if let Err(e) = tx.commit().await {
-        log::error!("stash take commit for user {user_id}: {e}");
+    if save_stash(pool, user_id, &stash).await.is_err() {
         return false;
     }
     if let Some(p) = world.get_player_mut(pid) {
-        p.inventory.add_item(item_id, quantity);
+        p.inventory = inventory;
     }
     true
 }
@@ -1589,31 +1681,220 @@ async fn stash_add(pool: &SqlitePool, user_id: i64, items: &[InventoryItem]) {
     if items.is_empty() {
         return;
     }
-    let mut tx = match pool.begin().await {
-        Ok(tx) => tx,
-        Err(e) => {
-            log::error!("stash tx for user {user_id}: {e}");
-            return;
-        }
-    };
+    let mut stash = load_stash(pool, user_id).await;
+    let mut lost = 0usize;
     for it in items {
-        if let Err(e) = sqlx::query(
-            "INSERT INTO stash_items (user_id, item_id, quantity) VALUES (?, ?, ?) \
-             ON CONFLICT(user_id, item_id) DO UPDATE SET quantity = quantity + excluded.quantity",
+        if !add_to_items(
+            &mut stash,
+            it.item_id,
+            it.quantity,
+            STASH_GRID_W,
+            STASH_GRID_H,
+        ) {
+            lost += 1;
+            log::error!(
+                "stash full for user {user_id}: {} x{} not stored",
+                it.item_id,
+                it.quantity
+            );
+        }
+    }
+    if let Err(e) = save_stash(pool, user_id, &stash).await {
+        log::error!("stash save for user {user_id}: {e:?}");
+    } else if lost > 0 {
+        log::warn!("stash overflow for user {user_id}: {lost} stacks lost");
+    }
+}
+
+/// Перезаписывает схрон одной транзакцией: позиции в сетке — часть состояния.
+async fn save_stash(
+    pool: &SqlitePool,
+    user_id: i64,
+    items: &[InventoryItem],
+) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    sqlx::query("DELETE FROM stash_items WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    for it in items {
+        sqlx::query(
+            "INSERT INTO stash_items (user_id, item_id, quantity, slot, x, y, rotated) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(user_id)
         .bind(it.item_id)
         .bind(it.quantity)
+        .bind(it.slot)
+        .bind(it.x)
+        .bind(it.y)
+        .bind(it.rotated)
         .execute(&mut *tx)
         .await
-        {
-            log::error!("stash insert for user {user_id}: {e}");
-            return;
+        .map_err(|e| e.to_string())?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn container_grid(container: ItemContainer) -> (i32, i32) {
+    match container {
+        ItemContainer::Inventory => (RAID_GRID_W, RAID_GRID_H),
+        ItemContainer::Stash => (STASH_GRID_W, STASH_GRID_H),
+    }
+}
+
+struct MoveRequest {
+    from: ItemContainer,
+    item_id: u64,
+    to: ItemContainer,
+    x: i32,
+    y: i32,
+    rotated: bool,
+}
+
+/// Переносит стек между контейнерами по серверным правилам.
+///
+/// Клиент присылает только намерение и клетку. Занятость, границы, наличие
+/// предмета и доступность рюкзака проверяются здесь; ответ — полные снимки
+/// обоих контейнеров, поэтому подсмотреть состояние клиенту нечем.
+async fn move_item(
+    pool: &SqlitePool,
+    world: &mut SimWorld,
+    user_id: i64,
+    pid: u64,
+    request: MoveRequest,
+) -> Result<(), String> {
+    let MoveRequest {
+        from,
+        item_id,
+        to,
+        x,
+        y,
+        rotated,
+    } = request;
+    let item_id = i64::try_from(item_id).map_err(|_| "неизвестный предмет".to_string())?;
+    if !matches!(
+        zn_sim::ids::classify(item_id as u64),
+        Some(zn_sim::ids::IdKind::Item | zn_sim::ids::IdKind::Artifact)
+    ) {
+        return Err("неизвестный предмет".into());
+    }
+    if (from == ItemContainer::Inventory || to == ItemContainer::Inventory)
+        && world.get_player(pid).is_none()
+    {
+        return Err("вы не в рейде".into());
+    }
+    let mut inventory = world
+        .get_player(pid)
+        .map(|p| p.inventory.clone())
+        .unwrap_or_default();
+    let mut stash = load_stash(pool, user_id).await;
+
+    let source_has = match from {
+        ItemContainer::Inventory => inventory.items.iter().any(|i| i.item_id == item_id),
+        ItemContainer::Stash => stash.iter().any(|i| i.item_id == item_id),
+    };
+    if !source_has {
+        return Err("предмет не найден".into());
+    }
+
+    if from == to {
+        let ok = match from {
+            ItemContainer::Inventory => move_in_items(
+                &mut inventory.items,
+                item_id,
+                x,
+                y,
+                rotated,
+                RAID_GRID_W,
+                RAID_GRID_H,
+            ),
+            ItemContainer::Stash => move_in_items(
+                &mut stash,
+                item_id,
+                x,
+                y,
+                rotated,
+                STASH_GRID_W,
+                STASH_GRID_H,
+            ),
+        };
+        if !ok {
+            return Err("клетка занята".into());
+        }
+        match from {
+            ItemContainer::Inventory => {
+                if let Some(p) = world.get_player_mut(pid) {
+                    p.inventory = inventory.clone();
+                }
+                save_inventory(pool, user_id, &inventory).await;
+            }
+            ItemContainer::Stash => {
+                save_stash(pool, user_id, &stash).await?;
+            }
+        }
+        return Ok(());
+    }
+
+    let (grid_w, grid_h) = container_grid(to);
+    let dest_has_stack = match to {
+        ItemContainer::Inventory => inventory.items.iter().any(|i| i.item_id == item_id),
+        ItemContainer::Stash => stash.iter().any(|i| i.item_id == item_id),
+    };
+    let dest_items = match to {
+        ItemContainer::Inventory => &inventory.items,
+        ItemContainer::Stash => &stash,
+    };
+    if !dest_has_stack && !can_place(dest_items, item_id, x, y, rotated, (grid_w, grid_h), None) {
+        return Err("клетка занята".into());
+    }
+
+    let moved = match from {
+        ItemContainer::Inventory => take_from_items(&mut inventory.items, item_id),
+        ItemContainer::Stash => take_from_items(&mut stash, item_id),
+    }
+    .ok_or_else(|| "предмет не найден".to_string())?;
+
+    match to {
+        ItemContainer::Inventory => {
+            if let Some(existing) = inventory.items.iter_mut().find(|i| i.item_id == item_id) {
+                existing.quantity += moved.quantity;
+            } else {
+                let mut placed = moved;
+                placed.x = x;
+                placed.y = y;
+                placed.rotated = rotated;
+                placed.slot = inventory.items.len() as i32;
+                inventory.items.push(placed);
+            }
+            save_stash(pool, user_id, &stash).await?;
+            if let Some(p) = world.get_player_mut(pid) {
+                p.inventory = inventory.clone();
+            }
+            save_inventory(pool, user_id, &inventory).await;
+        }
+        ItemContainer::Stash => {
+            if let Some(existing) = stash.iter_mut().find(|i| i.item_id == item_id) {
+                existing.quantity += moved.quantity;
+            } else {
+                let mut placed = moved;
+                placed.x = x;
+                placed.y = y;
+                placed.rotated = rotated;
+                placed.slot = stash.len() as i32;
+                stash.push(placed);
+            }
+            if let Some(p) = world.get_player_mut(pid) {
+                p.inventory = inventory.clone();
+            }
+            save_inventory(pool, user_id, &inventory).await;
+            save_stash(pool, user_id, &stash).await?;
         }
     }
-    if let Err(e) = tx.commit().await {
-        log::error!("stash commit for user {user_id}: {e}");
-    }
+    log::info!("player {pid} moved item {item_id} {from:?} -> {to:?} at ({x},{y})");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1897,6 +2178,9 @@ mod tests {
                 item_id: zn_sim::items::SMG as i64,
                 quantity: 2,
                 slot: 0,
+                x: 0,
+                y: 0,
+                rotated: false,
             }],
         )
         .await;
@@ -1921,5 +2205,59 @@ mod tests {
             "без игрока предмет не покидает схрон"
         );
         assert_eq!(load_stash(&pool, 42).await[0].quantity, 1);
+    }
+
+    #[tokio::test]
+    async fn grid_move_persists_layout_and_rejects_bad_cells() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let mut w = SimWorld::new();
+        w.add_player(Player::new(1, "p"));
+        stash_add(
+            &pool,
+            42,
+            &[InventoryItem::new(items::MEDKIT as i64, 2, 0, 0, false)],
+        )
+        .await;
+
+        move_item(
+            &pool,
+            &mut w,
+            42,
+            1,
+            MoveRequest {
+                from: ItemContainer::Stash,
+                item_id: items::MEDKIT,
+                to: ItemContainer::Inventory,
+                x: 3,
+                y: 2,
+                rotated: false,
+            },
+        )
+        .await
+        .unwrap();
+        let med = &w.get_player(1).unwrap().inventory.items[0];
+        assert_eq!((med.x, med.y, med.quantity), (3, 2, 2));
+        assert!(load_stash(&pool, 42).await.is_empty());
+
+        assert!(
+            move_item(
+                &pool,
+                &mut w,
+                42,
+                1,
+                MoveRequest {
+                    from: ItemContainer::Inventory,
+                    item_id: items::MEDKIT,
+                    to: ItemContainer::Inventory,
+                    x: RAID_GRID_W,
+                    y: 0,
+                    rotated: false,
+                },
+            )
+            .await
+            .is_err(),
+            "выход за границы сетки должен отклоняться"
+        );
     }
 }

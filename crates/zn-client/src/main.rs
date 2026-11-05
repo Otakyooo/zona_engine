@@ -24,7 +24,10 @@ use zn_sim::{
 mod hud;
 mod perf;
 mod prediction;
+mod settings;
 mod ui;
+
+use settings::Settings;
 
 /// Складывает дельту схрона в локальный список.
 fn merge_stack(stash: &mut Vec<zn_sim::InventoryItem>, incoming: &zn_sim::InventoryItem) {
@@ -178,9 +181,12 @@ struct App {
     protocol_ok: bool,
     /// Экран — состояние, а не флаг: от него зависит и ввод, и отрисовка.
     screen: ui::Screen,
+    /// Куда вернуться из настроек: меню или пауза.
+    settings_return: ui::Screen,
+    settings: Settings,
+    inventory_ui: ui::InventoryUiState,
     /// Переводит события winit в события egui. Без него кнопки не нажимаются.
     egui_state: Option<egui_winit::State>,
-    show_inventory: bool,
     interp: RemoteInterp,
 
     // networking
@@ -202,7 +208,10 @@ impl ApplicationHandler for App {
         if self.window.is_none() {
             let attrs = Window::default_attributes().with_title("ZONA - client");
             let window = Arc::new(event_loop.create_window(attrs).expect("window"));
-            let renderer = pollster::block_on(Renderer::new(window.clone())).expect("renderer");
+            let mut renderer = pollster::block_on(Renderer::new(window.clone())).expect("renderer");
+            if !renderer.set_vsync(self.settings.vsync) {
+                log::warn!("V-Sync недоступен на этой поверхности");
+            }
 
             // meshes
             let mut meshes: Vec<(Mesh, Option<String>)> = Vec::new();
@@ -327,10 +336,10 @@ impl ApplicationHandler for App {
                 eye: Vec3::new(0.0, 2.0, 5.0),
                 target: Vec3::new(0.0, 1.0, 0.0),
                 up: Vec3::Y,
-                fov_y: 1.0,
+                fov_y: self.settings.fov_radians(),
                 aspect: window.inner_size().width as f32 / window.inner_size().height.max(1) as f32,
                 near: 0.1,
-                far: 100.0,
+                far: self.settings.render_distance,
             };
 
             let mut textures = std::collections::HashMap::new();
@@ -439,56 +448,29 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.input.handle_key_event(event);
-                if self.screen != ui::Screen::Playing {
-                    return;
-                }
                 use winit::keyboard::PhysicalKey;
                 if event.state == winit::event::ElementState::Pressed
-                    && let PhysicalKey::Code(KeyCode::Escape) = event.physical_key
+                    && let PhysicalKey::Code(code) = event.physical_key
                 {
-                    if self.cursor_captured {
-                        self.release_cursor();
-                    } else {
-                        self.capture_cursor();
-                    }
-                }
-                // Tab: панель инвентаря поверх HUD.
-                if event.state == winit::event::ElementState::Pressed
-                    && let PhysicalKey::Code(KeyCode::Tab) = event.physical_key
-                {
-                    self.show_inventory = !self.show_inventory;
-                }
-                // E: pickup
-                if event.state == winit::event::ElementState::Pressed
-                    && let PhysicalKey::Code(KeyCode::KeyE) = event.physical_key
-                    && let Some(snap) = &self.latest_snapshot
-                {
-                    let pos = self.local_pos;
-                    let mut best: Option<(u64, f32)> = None;
-                    for l in &snap.loot {
-                        let d = (l.position - pos).length();
-                        if d < 2.0 && (best.is_none() || d < best.unwrap().1) {
-                            best = Some((l.id, d));
+                    match self.screen {
+                        ui::Screen::Playing => match code {
+                            KeyCode::Escape => self.pause(),
+                            KeyCode::Tab => self.open_inventory(),
+                            KeyCode::KeyE => self.try_pickup(),
+                            KeyCode::Digit1 => {
+                                let _ = self.net_out.send(ClientPacket::Consume { item_id: 1 });
+                            }
+                            KeyCode::Digit2 => {
+                                let _ = self.net_out.send(ClientPacket::Consume { item_id: 2 });
+                            }
+                            _ => {}
+                        },
+                        ui::Screen::Inventory if matches!(code, KeyCode::Escape | KeyCode::Tab) => {
+                            self.close_inventory();
                         }
-                    }
-                    for a in &snap.artifacts {
-                        let d = (a.position - pos).length();
-                        if d < 2.0 && (best.is_none() || d < best.unwrap().1) {
-                            // Артефакты живут в своём диапазоне id, иначе сервер
-                            // примет их за предмет инвентаря.
-                            best = Some((zn_sim::ids::ARTIFACT_BASE + a.id, d));
-                        }
-                    }
-                    if let Some((eid, _)) = best {
-                        let _ = self.net_out.send(ClientPacket::Pickup { entity_id: eid });
-                    }
-                }
-                if event.state == winit::event::ElementState::Pressed {
-                    if let PhysicalKey::Code(KeyCode::Digit1) = event.physical_key {
-                        let _ = self.net_out.send(ClientPacket::Consume { item_id: 1 });
-                    }
-                    if let PhysicalKey::Code(KeyCode::Digit2) = event.physical_key {
-                        let _ = self.net_out.send(ClientPacket::Consume { item_id: 2 });
+                        ui::Screen::Paused if code == KeyCode::Escape => self.resume(),
+                        ui::Screen::Settings if code == KeyCode::Escape => self.close_settings(),
+                        _ => {}
                     }
                 }
             }
@@ -633,6 +615,11 @@ impl ApplicationHandler for App {
                                 for it in &items {
                                     merge_stack(&mut self.stash, it);
                                 }
+                                zn_sim::normalize_items(
+                                    &mut self.stash,
+                                    zn_sim::STASH_GRID_W,
+                                    zn_sim::STASH_GRID_H,
+                                );
                                 let text = items
                                     .iter()
                                     .map(|i| {
@@ -674,6 +661,11 @@ impl ApplicationHandler for App {
                                 Instant::now(),
                             ));
                         }
+                        ServerPacket::MoveRejected { reason } => {
+                            self.hud
+                                .toasts
+                                .push((format!("перенос отклонён: {reason}"), Instant::now()));
+                        }
                         ServerPacket::ShotResult {
                             hit,
                             killed,
@@ -707,8 +699,10 @@ impl ApplicationHandler for App {
                 // mouse look
                 let (dx, dy) = self.input.mouse_delta;
                 if self.cursor_captured {
-                    self.yaw += dx * 0.002;
-                    self.pitch = (self.pitch - dy * 0.002).clamp(-1.4, 1.4);
+                    let sensitivity = 0.002 * self.settings.mouse_sensitivity;
+                    let invert = if self.settings.invert_y { -1.0 } else { 1.0 };
+                    self.yaw += dx * sensitivity;
+                    self.pitch = (self.pitch - dy * sensitivity * invert).clamp(-1.4, 1.4);
                     // gamepad right stick
                     self.yaw += self.input.gamepad_right.0 * dt * 2.0;
                     self.pitch =
@@ -995,26 +989,42 @@ impl ApplicationHandler for App {
                 let inventory = &self.inventory;
                 let stash = &self.stash;
                 let raid_result = self.raid_result.as_ref();
-                let show_inventory = self.show_inventory;
                 let weapon_id = self.weapon_id;
                 let protocol_ok = self.protocol_ok;
+                let settings = self.settings;
+                let settings_return = self.settings_return;
+                let mut inventory_ui = std::mem::take(&mut self.inventory_ui);
                 let output = self.egui_ctx.run(raw, |ctx| {
                     action = match screen {
-                        ui::Screen::Menu => ui::menu(ctx, weapon_id, protocol_ok, inventory, stash),
+                        ui::Screen::Menu => ui::menu(
+                            ctx,
+                            weapon_id,
+                            protocol_ok,
+                            inventory,
+                            stash,
+                            &mut inventory_ui,
+                        ),
+                        ui::Screen::Settings => ui::settings(ctx, &settings, settings_return),
                         ui::Screen::Dead => ui::dead(ctx, hud_state.xp, hud_state.level),
                         ui::Screen::Result => match raid_result {
                             Some(result) => ui::result(ctx, result),
                             None => ui::Action::ToMenu,
                         },
+                        ui::Screen::Paused => {
+                            hud::draw(ctx, hud_state, Instant::now());
+                            ui::paused(ctx)
+                        }
+                        ui::Screen::Inventory => {
+                            hud::draw(ctx, hud_state, Instant::now());
+                            ui::inventory(ctx, inventory, stash, weapon_id, &mut inventory_ui)
+                        }
                         ui::Screen::Playing => {
                             hud::draw(ctx, hud_state, Instant::now());
-                            if show_inventory {
-                                ui::inventory(ctx, inventory);
-                            }
                             ui::Action::None
                         }
                     };
                 });
+                self.inventory_ui = inventory_ui;
 
                 let mut render_stats = zn_render::RenderStats::default();
                 if let Some(r) = self.renderer.as_mut() {
@@ -1058,16 +1068,40 @@ impl ApplicationHandler for App {
                         self.screen = ui::Screen::Menu;
                         self.release_cursor();
                     }
+                    ui::Action::Resume => self.resume(),
+                    ui::Action::OpenInventory => self.open_inventory(),
+                    ui::Action::CloseInventory => self.close_inventory(),
+                    ui::Action::OpenSettings => self.open_settings(),
+                    ui::Action::CloseSettings => self.close_settings(),
+                    ui::Action::ApplySettings(settings) => {
+                        self.settings = settings.clamped();
+                        self.apply_settings();
+                    }
                     ui::Action::Quit => event_loop.exit(),
                     ui::Action::SetWeapon(id) => {
                         let _ = self
                             .net_out
                             .send(ClientPacket::SetLoadout { weapon_id: id });
                     }
-                    ui::Action::TakeItem(item_id, quantity) => {
-                        let _ = self
-                            .net_out
-                            .send(ClientPacket::TakeFromStash { item_id, quantity });
+                    ui::Action::ConsumeItem(item_id) => {
+                        let _ = self.net_out.send(ClientPacket::Consume { item_id });
+                    }
+                    ui::Action::MoveItem {
+                        from,
+                        item_id,
+                        to,
+                        x,
+                        y,
+                        rotated,
+                    } => {
+                        let _ = self.net_out.send(ClientPacket::MoveItem {
+                            from,
+                            item_id,
+                            to,
+                            x,
+                            y,
+                            rotated,
+                        });
                     }
                     ui::Action::None => {}
                 }
@@ -1161,6 +1195,99 @@ impl App {
         });
     }
 
+    fn pause(&mut self) {
+        if self.screen == ui::Screen::Playing {
+            self.screen = ui::Screen::Paused;
+            self.inventory_ui = ui::InventoryUiState::default();
+            self.release_cursor();
+        }
+    }
+
+    fn resume(&mut self) {
+        self.screen = ui::Screen::Playing;
+        self.capture_cursor();
+    }
+
+    fn open_inventory(&mut self) {
+        if matches!(self.screen, ui::Screen::Playing | ui::Screen::Paused) {
+            self.screen = ui::Screen::Inventory;
+            self.inventory_ui = ui::InventoryUiState::default();
+            self.release_cursor();
+        }
+    }
+
+    fn close_inventory(&mut self) {
+        self.screen = ui::Screen::Playing;
+        self.inventory_ui = ui::InventoryUiState::default();
+        self.capture_cursor();
+    }
+
+    fn open_settings(&mut self) {
+        self.settings_return = self.screen;
+        self.screen = ui::Screen::Settings;
+        self.inventory_ui = ui::InventoryUiState::default();
+        self.release_cursor();
+    }
+
+    fn close_settings(&mut self) {
+        self.save_settings();
+        self.screen = self.settings_return;
+        if self.screen == ui::Screen::Playing {
+            self.capture_cursor();
+        } else {
+            self.release_cursor();
+        }
+    }
+
+    fn save_settings(&self) {
+        if let Err(e) = self.settings.save(&settings_path()) {
+            log::warn!("настройки не сохранены: {e}");
+        }
+    }
+
+    fn apply_settings(&mut self) {
+        self.camera.fov_y = self.settings.fov_radians();
+        self.camera.far = self.settings.render_distance;
+        self.audio.master_volume = self.settings.master_volume;
+        if let Some(renderer) = self.renderer.as_mut() {
+            let actual = renderer.set_vsync(self.settings.vsync);
+            if !actual && !self.settings.vsync {
+                // Поверхность умеет только Fifo — показываем это честно,
+                // иначе чекбокс обещал бы режим, которого нет.
+                self.settings.vsync = true;
+                self.hud.toasts.push((
+                    "V-Sync: режим без синхронизации недоступен".into(),
+                    Instant::now(),
+                ));
+            }
+        }
+    }
+
+    fn try_pickup(&mut self) {
+        let Some(snap) = &self.latest_snapshot else {
+            return;
+        };
+        let pos = self.local_pos;
+        let mut best: Option<(u64, f32)> = None;
+        for l in &snap.loot {
+            let d = (l.position - pos).length();
+            if d < 2.0 && (best.is_none() || d < best.unwrap().1) {
+                best = Some((l.id, d));
+            }
+        }
+        for a in &snap.artifacts {
+            let d = (a.position - pos).length();
+            if d < 2.0 && (best.is_none() || d < best.unwrap().1) {
+                // Артефакты живут в своём диапазоне id, иначе сервер
+                // примет их за предмет инвентаря.
+                best = Some((zn_sim::ids::ARTIFACT_BASE + a.id, d));
+            }
+        }
+        if let Some((eid, _)) = best {
+            let _ = self.net_out.send(ClientPacket::Pickup { entity_id: eid });
+        }
+    }
+
     /// Захват курсора — только по явному действию игрока (меню или клик).
     fn capture_cursor(&mut self) {
         self.cursor_captured = true;
@@ -1179,6 +1306,18 @@ impl App {
             w.set_cursor_visible(true);
         }
     }
+}
+
+/// Настройки лежат рядом с crash.log: `%APPDATA%\ZONA` на Windows,
+/// иначе — в рабочем каталоге (Linux/CI).
+fn settings_path() -> std::path::PathBuf {
+    std::env::var("APPDATA")
+        .map(|p| {
+            std::path::PathBuf::from(p)
+                .join("ZONA")
+                .join("settings.ron")
+        })
+        .unwrap_or_else(|_| std::path::PathBuf::from("settings.ron"))
 }
 
 /// Каталог с ресурсами (`assets/`, `maps/`).
@@ -1368,6 +1507,9 @@ fn main() {
         }
     });
 
+    let settings = Settings::load(&settings_path()).unwrap_or_default();
+    let mut audio = zn_audio::AudioManager::new();
+    audio.master_volume = settings.master_volume;
     let event_loop = EventLoop::new().expect("event loop");
     let mut app = App {
         window: None,
@@ -1377,10 +1519,10 @@ fn main() {
             eye: Vec3::ZERO,
             target: Vec3::Z,
             up: Vec3::Y,
-            fov_y: 1.0,
+            fov_y: settings.fov_radians(),
             aspect: 1.0,
             near: 0.1,
-            far: 100.0,
+            far: settings.render_distance,
         },
         scene_items: Vec::new(),
         entity_meshes: std::collections::HashMap::new(),
@@ -1397,7 +1539,7 @@ fn main() {
         fps: 0.0,
         perf: perf::PerfStats::new(),
         net_dead: false,
-        audio: zn_audio::AudioManager::new(),
+        audio,
         step_timer: 0.0,
         last_health: 100.0,
         last_time: None,
@@ -1416,8 +1558,10 @@ fn main() {
         ping_at: None,
         protocol_ok: true,
         screen: ui::Screen::Menu,
+        settings_return: ui::Screen::Menu,
+        settings,
+        inventory_ui: ui::InventoryUiState::default(),
         egui_state: None,
-        show_inventory: false,
         interp: RemoteInterp::default(),
         net_out: out_tx,
         net_in: in_rx,
