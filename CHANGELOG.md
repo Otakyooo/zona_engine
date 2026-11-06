@@ -45,12 +45,6 @@
 
 ## v0.1.8
 
-### Исправления
-
-- `5210caa` fix(net): UDP packets are raw bincode, not length-prefixed frames
-
-## v0.1.7
-
 ### Новое
 
 - `6fdb588` feat(client): status toasts and connection-loss detection
@@ -67,6 +61,7 @@
 
 ### Исправления
 
+- `5210caa` fix(net): UDP packets are raw bincode, not length-prefixed frames
 - `105db46` fix: ship assets with releases and resolve them next to the exe
 - `a6e499c` fix(client): require real credentials and stop clobbering view angles
 - `abc4598` fix(net): cap frame size before allocating
