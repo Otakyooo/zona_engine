@@ -6,9 +6,15 @@ on:
   pull_request:
     branches: [main, dev]
 
+env:
+  # Память проекта: без этого сборка виснет на zn-physics (PITFALLS.md).
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   build-rust:
     runs-on: windows-latest
+    outputs:
+      test_count: ${{ steps.tests.outputs.count }}
     steps:
       - uses: actions/checkout@v7.0.1
       - uses: dtolnay/rust-toolchain@stable
@@ -19,11 +25,21 @@ jobs:
       - name: Format
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --all
+        run: cargo test --workspace
       - name: Build
         run: cargo build --workspace
+      # Считаем тесты здесь, где уже есть toolchain и тёплый target/.
+      # self-check получает число через output и не запускает cargo второй раз.
+      - name: Count tests
+        id: tests
+        shell: pwsh
+        run: |
+          $lines = cargo test --workspace -- --list
+          $n = @($lines | Where-Object { $_ -match ':\s*test\s*$' }).Count
+          if ($n -eq 0) { throw "[self-check] не удалось сосчитать тесты" }
+          "count=$n" >> $env:GITHUB_OUTPUT
 
   build-launcher:
     runs-on: windows-latest
@@ -94,3 +110,41 @@ jobs:
         uses: softprops/action-gh-release@v3.0.4
         with:
           files: dist/**
+
+  # Петля уробороса: сгенерированные документы коммитятся только при реальном
+  # diff и с [skip ci], иначе «коммит -> CI -> коммит» зациклится.
+  self-check:
+    needs: [build-rust]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.head_commit != null && !contains(github.event.head_commit.message, '[skip ci]')
+    runs-on: windows-latest
+    concurrency:
+      group: self-check-main
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      ZONA_TEST_COUNT: ${{ needs.build-rust.outputs.test_count }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+      - name: Verify and generate
+        run: node ci/self-check.js --verify --generate
+      - name: Commit generated docs
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ROADMAP.md CHANGELOG.md ci/artifacts/tests.json
+          # git diff --name-only всегда возвращает 0: так шаг не упадёт из-за
+          # $PSNativeCommandUseErrorActionPreference в pwsh.
+          $changed = git diff --cached --name-only
+          if ([string]::IsNullOrWhiteSpace($changed)) {
+            Write-Host "[self-check] generated docs unchanged"
+            exit 0
+          }
+          git commit -m "docs(roadmap): regenerate from artifacts [skip ci]"
+          git push origin HEAD:main

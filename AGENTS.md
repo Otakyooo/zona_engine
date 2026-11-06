@@ -20,12 +20,13 @@ migrations/ (in zn-server)
 
 - Build all: `cargo build --workspace`
 - Test all: `cargo test --workspace`
-- Lint: `cargo clippy --all-targets -- -D warnings`
+- Lint: `cargo clippy --workspace --all-targets -- -D warnings`
 - Format: `cargo fmt --all`
 - Client: `cargo run -p zn-client` (optional `--scene`, `--token`, `--username`, `--password`)
 - Server: `cargo run -p zn-server` (env `DATABASE_URL` optional, defaults to sqlite)
 - Editor: `cargo run -p zn-tools --bin zn-editor`
 - Launcher: `cd launcher; npm start` (requires `ELECTRON_RUN_AS_NODE` unset)
+- Self-check / roadmap loop: `node ci/self-check.js --verify --generate` (`--with-cargo` counts tests locally; in CI the count arrives via `ZONA_TEST_COUNT`)
 
 ## Conventions
 
@@ -66,7 +67,7 @@ For a release update (only when explicitly requested by user):
 ## Local workspace (WorkBuddy)
 
 - Canonical root: `C:\Users\russi\WorkBuddy AI\ai_games\zona_engine` (path contains a space — quote it in shell commands).
-- Synced from `E:\zona_engine` on 2026-11-05: sources, `.git`, agent memory, `zona.db` and the offline payload were copied and verified (file count, byte total, git status and HEAD all match). Build caches `target/` and `launcher/node_modules/` were intentionally left behind — regenerate with `cargo build` and `npm install`.
+- Synced from `E:\zona_engine` on 2026-11-05: sources, `.git`, agent memory, `zona.db` and the offline payload were copied and verified (file count, byte total, git status and HEAD all match). Build caches `target/` (~9.1 GB) and `launcher/node_modules/` (~550 MB) now exist locally after the rebuild; do not delete them.
 - `C:\Users\russi\WorkBuddy AI\Zona_games` is a stale clone frozen at v0.1.9 — never use it as the source of truth.
 - `E:\zona_engine` was the former working copy: the synced tree was verified, then the owner removed it manually on 2026-11-05 (automated removal was blocked by the host security policy on `Add-Type`). The folder no longer exists on disk; no action needed.
 - Durable agent notes live in `.workbuddy-ai/memory/` (tracked in git).
@@ -76,6 +77,8 @@ For a release update (only when explicitly requested by user):
 - Verify after every change: `cargo fmt --all -- --check`, `cargo build --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`.
 - Launcher check without a GUI session: `node --check launcher/main.js`, then `npm start` with `ELECTRON_RUN_AS_NODE` unset.
 - `launcher/manifest.stub.json` points at the local `launcher/game/zn-client.exe` (offline fallback); keep its path and sha256 in sync with the payload.
+- `ROADMAP.md` and `CHANGELOG.md` are **generated** by `ci/self-check.js`; never edit them by hand. The single editable source for phases, statuses, tasks and criteria is `ci/roadmap.yaml` (JSON inside YAML 1.2, no npm dependencies). `ci/artifacts/tests.json` is tracked (previous test count for regression checks); `next-step.md`, `journal-draft.md` and `CHANGELOG-unreleased.md` are untracked drafts.
+- The ouroboros loop: `code -> tests/metrics -> memory/journal -> next step -> code`. `ci/self-check.js` reads `ci/roadmap.yaml`, `Cargo.toml`, `PROTOCOL_VERSION`/`MAX_FRAME_BYTES`, `ci/artifacts/tests.json` (or `ZONA_TEST_COUNT`), `git log` and the tag list; it regenerates the roadmap, tag-based changelog and next-step draft and fails on version/test regressions. Generated docs contain no HEAD, date or `[skip ci]` commits, so they are byte-stable between releases; CI commits them only on a real diff with `[skip ci]`, otherwise `commit -> CI -> commit` loops forever. Reading `logs/metrics.jsonl`, `ci/artifacts/load.json`, `OPEN.md` and `GUI_CHECKLIST.md` is planned for Phase 3. Live GUI verification is entered only by the owner.
 
 ## Memory (for agents)
 
@@ -104,4 +107,3 @@ Project memory lives in `.workbuddy-ai/memory/` and is tracked in git. It is the
 - Frames are capped at `zn_net::MAX_FRAME_BYTES` (64 KiB). Raise the constant, never allocate from the wire length directly.
 - Sessions live in the `sessions` table; `Connect` validates the token with an expiry check, disconnect deletes it, and a sweep drops expired rows. There is no in-memory token cache.
 - Login and register attempts are limited per peer IP (5 per 5 minutes, reset on success).
-

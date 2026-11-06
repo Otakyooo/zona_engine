@@ -1,3 +1,5 @@
+# Superseded 2026-11-06 by `ci/roadmap.yaml` (generated `ROADMAP.md`).
+
 # ZONA Full Refactor Plan
 
 Goal: resolve critical netcode bugs, security gaps, persistence, simulation completeness, rendering/performance, and test coverage identified in the project audit.

@@ -1,0 +1,243 @@
+# Единственный редактируемый источник ROADMAP.md.
+# YAML 1.2 является надмножеством JSON, поэтому ci/self-check.js читает этот
+# файл стандартным JSON.parse без npm-зависимостей. Комментарии допустимы
+# только отдельными строками до начала объекта.
+# Правило: ROADMAP.md и CHANGELOG.md не редактировать руками — править здесь.
+{
+  "project": "ZONA Engine",
+  "axis": "Уроборос: код -> тесты/метрики -> память/журнал -> автоматически выведенный следующий шаг -> код",
+  "baseline": {
+    "version": "0.3.1",
+    "protocol": 8,
+    "tests": 144,
+    "commit": "452b0bb"
+  },
+  "status_labels": {
+    "planned": "запланировано",
+    "in_progress": "в работе",
+    "done": "готово"
+  },
+  "principles": [
+    "CARGO_INCREMENTAL=0 всегда; глобальный CARGO_TARGET_DIR запрещён",
+    "После любого изменения: cargo fmt --all -- --check, cargo build --workspace, cargo test --workspace, cargo clippy --workspace --all-targets -- -D warnings",
+    "Версия — один источник [workspace.package] version; цепочка Cargo.toml <-> launcher/package.json <-> manifest.stub.json <-> тег v* через ci/check-versions.js; после замены payload — npm run stub",
+    "Новые варианты ClientPacket/ServerPacket только в конец; при bump протокола — dual-read, пересборка клиент+сервер+stub, поле protocol в манифесте",
+    "Состояние в zn-sim, БД только у сервера; кадр <= 64 КиБ; id через zn_sim::ids",
+    "Conventional Commits; старт задачи — MEMORY.md + OPEN.md; финал — journal/<дата>.md с числами и хешами",
+    "ROADMAP.md генерируется ci/self-check.js, редактировать только ci/roadmap.yaml",
+    "Релиз и живая GUI-проверка — только владелец; агент проверяет node --check и логи"
+  ],
+  "rejected": [
+    "battle-royale и общий таймер рейда",
+    "полный лут при смерти",
+    "принудительная эвакуация и мгновенный выход в базу",
+    "клиентский урон и клиентский хитскан",
+    "pay-to-win, лутбоксы, battle pass",
+    "полная серверная физика каждой пули",
+    "бесшовный мир без стриминга, третье лицо и транспорт",
+    "персистентность каждой гильзы и трупа"
+  ],
+  "risks": [
+    { "risk": "Бесконечный цикл CI: автокоммит ROADMAP.md -> новый CI", "mitigation": "diff-guard + [skip ci] + отдельный job с permissions: contents: write" },
+    { "risk": "GUI в песочнице агента не поднимается (-1073741819)", "mitigation": "агент: node --check, логи, метрики; чек-лист выполняет владелец" },
+    { "risk": "Холодная сборка 0xc0000005", "mitigation": "CARGO_INCREMENTAL=0 ... -j 2, не чистить target/" },
+    { "risk": "Рассинхрон офлайн-payload и протокола", "mitigation": "чек-лист Фазы 2 + поле protocol в check-versions.js" },
+    { "risk": "bincode без схемы, позиционные дискриминанты", "mitigation": "варианты в конец, PROTOCOL_VERSION, wire_compat.rs, dual-read" },
+    { "risk": "Downgrade до plaintext при dual-read", "mitigation": "legacy только для старых токенов, метрика, отключение в v0.6.0" },
+    { "risk": "Ключи сессий против запрета кэша токенов", "mitigation": "ключ в таблице sessions, кэш по addr на время соединения, явное D32" },
+    { "risk": "Postgres-фича мертва, datetime('now') SQLite-only", "mitigation": "db/dialect.rs либо удаление фичи + D34" },
+    { "risk": "Нет rollback у миграций", "mitigation": "только аддитивные SQL, тест на копии zona.db, бэкап перед bump БД" },
+    { "risk": "AEAD добавляет байты к кадру", "mitigation": "тест на MAX_FRAME_BYTES с учётом служебных данных" },
+    { "risk": "Рефактор main.rs ломает сеть", "mitigation": "дробить на коммиты, 4 проверки после каждого, интеграционный тест Фазы 3" },
+    { "risk": "Непроверенная живая сеть", "mitigation": "loadbot, GUI_CHECKLIST.md, метрики RTT/откат, приёмка владельцем" }
+  ],
+  "phases": [
+    {
+      "id": "F0",
+      "version": "без релиза",
+      "priority": "P0",
+      "status": "done",
+      "title": "Нулевой цикл: измеримая петля",
+      "goal": "Сделать петлю уробороса измеряемой до первого изменения геймплея.",
+      "tasks": [
+        "ci/roadmap.yaml + ci/self-check.js: генерация ROADMAP.md, CHANGELOG.md, next-step.md без внешних зависимостей",
+        "ci.yml: clippy --workspace --all-targets, test --workspace, env CARGO_INCREMENTAL=0, job self-check с diff-guard и [skip ci]",
+        "AGENTS.md: зафиксировать правило «ROADMAP.md генерируемый, править ci/roadmap.yaml»",
+        "journal/<дата>.md: baseline 144 теста, 0.3.1, протокол 8, зелёные проверки"
+      ],
+      "criteria": [
+        "node ci/self-check.js --verify --generate зелёный",
+        "ROADMAP.md перегенерируется без diff при повторном запуске",
+        "Два прогона CI подряд не создают бесконечную цепочку коммитов",
+        "baseline 144 теста подтверждён cargo test --workspace -- --list и записан в ci/artifacts/tests.json"
+      ],
+      "metric_source": "ci/roadmap.yaml, ci/check-versions.js, ci/artifacts/tests.json",
+      "depends": "—",
+      "risks": "Бесконечный CI-цикл; CARGO_INCREMENTAL=0 обязателен"
+    },
+    {
+      "id": "F1",
+      "version": "v0.4.0",
+      "priority": "P0",
+      "status": "planned",
+      "title": "Безопасность и надёжность",
+      "goal": "Убрать продовые падения, закрыть дыры входа и флуда, сделать сохранение подтверждаемым — без правок провода.",
+      "tasks": [
+        "zn-client/src/main.rs:1059-1066: guard Action::StartRaid при !protocol_ok; ui.rs:227,813,870: ui.add_enabled(protocol_ok, ...) для «В рейд»; ui.rs:895-915: тест menu(..., false, ...); отказ пишется log::error! на клиенте (main.rs:510-518)",
+        "zn-net/src/lib.rs: ActionRateLimiter для Shot/Consume/Connect/Register/Pickup/MoveItem; общий per-IP бакет; проверка телепорта в zn-sim",
+        "zn-client/src/main.rs:1479: parse().unwrap() -> обрабатываемая ошибка + тест (144 -> 145); launcher/renderer.js:96,98: удалить двойной init()",
+        "zn-server/src/main.rs:112, PersistJob/spawn_persister: ctrl_c, drain с подтверждением записи, сохранение по смерти/эвакуации/выходу"
+      ],
+      "criteria": [
+        ">=160 тестов",
+        "0 unwrap() в сетевых путях",
+        "тест: при protocol_ok=false кнопка «В рейд» отключена и Action::StartRaid не отправляется; тест graceful shutdown с подтверждённой записью",
+        "4 проверки + check-versions.js зелёные"
+      ],
+      "metric_source": "cargo test --workspace, log::error! клиента (метрика отказа сервера — F2)",
+      "depends": "F0",
+      "risks": "ClientPacket не меняется, протокол 8; подпись обновлений — F6. Сервер шлёт Welcome{protocol} только в ответ на Connect и не знает версию клиента, поэтому запрет Connect и серверная метрика без правок провода невозможны"
+    },
+    {
+      "id": "F2",
+      "version": "v0.5.0",
+      "priority": "P0/P1",
+      "status": "planned",
+      "title": "Протокол 9, шифрование, живая сеть",
+      "goal": "Легализовать ломающие изменения провода и закрыть открытый трафик.",
+      "tasks": [
+        "PROTOCOL_VERSION 8 -> 9; Handshake/HandshakeAck/Reload/Trade строго в конец; удалить легаси TakeFromStash",
+        "TLS/rustls для TCP: tokio-rustls, ZONA_TLS_CERT/ZONA_TLS_KEY, --tls-ca у клиента, deploy/README.md",
+        "AEAD ChaCha20-Poly1305 для UDP: session_key в LoginResult, миграция 0010_session_keys.sql, nonce из session_id+seq, anti-replay",
+        "Dual-read 8/9 без downgrade: Handshake у клиента 9, метрика protocol_8_clients, отключение legacy в v0.6.0",
+        "Серверная метрика отказа по версии протокола (клиент сообщает версию в Handshake): счётчик + logs/metrics.jsonl; новые варианты enum только в конец",
+        "Jitter buffer ввода, keyframe при реконнекте, оживить/удалить ReliableChannel, zn-net/tests/wire_compat.rs",
+        "Релизная цепочка: пересборка payload -> npm run stub -> protocol в manifest.stub.json и check-versions.js -> версия/тег (только по запросу владельца)"
+      ],
+      "criteria": [
+        "check-versions.js ok 0.5.0 / protocol 9",
+        ">=190 тестов, wire_compat зелёный на 8 и 9",
+        "тесты: plaintext отклонён, повтор seq отклонён, TCP+UDP через шифрованный канал",
+        "AGENTS.md:105 и PITFALLS.md:26 обновлены под ключи сессий (D32)"
+      ],
+      "metric_source": "zn-net/src/lib.rs:17, manifest.stub.json, ci/artifacts/load.json",
+      "depends": "F0, F1",
+      "risks": "Рассинхрон офлайн-payload; bincode без схемы; ротация ключа и expiry сессии (D33)"
+    },
+    {
+      "id": "F3",
+      "version": "v0.6.0",
+      "priority": "P1",
+      "status": "planned",
+      "title": "Архитектура, тесты, метрики",
+      "goal": "Разбить монолиты, удалить мёртвый код, включить полноценную петлю уробороса.",
+      "tasks": [
+        "zn-server/src/main.rs (2263 строки) -> src/{net,sim,persist,db}/mod.rs; zn-client/src/main.rs -> src/app/*; инвариант AGENTS.md:101",
+        "Удалить или реализовать ChunkManager/ChunkEvent/load_chunk_async/chunk_of; отключить legacy-протокол 8",
+        "Новые тесты: zn-server/tests/integration.rs, migrations.rs, zn-tools/src/bin/loadbot.rs",
+        "--telemetry из заглушки в logs/metrics.jsonl: tick, snapshot bytes, RTT EWMA, FPS, видимые объекты",
+        "Инстансинг / трансформ в uniform за feature flag; честный бюджет MAX_RENDER_OBJECTS",
+        "ci/self-check.js читает реальные метрики, OPEN.md и GUI_CHECKLIST.md и генерирует CHANGELOG.md, next-step.md, статусы ROADMAP.md"
+      ],
+      "criteria": [
+        ">=230 тестов (>=3 интеграционных, >=1 нагрузочный, >=1 golden-wire)",
+        "бюджет тика <=16.67 мс при 50 ботах",
+        "0 мёртвых pub из OPEN.md:51; CI gate зелёный"
+      ],
+      "metric_source": "logs/metrics.jsonl, ci/artifacts/load.json",
+      "depends": "F2",
+      "risks": "Рефактор ядра сети дробить на коммиты с 4 проверками; GUI в песочнице недоступен"
+    },
+    {
+      "id": "F4",
+      "version": "v0.7.0",
+      "priority": "P2",
+      "status": "planned",
+      "title": "Экономика и боёвка",
+      "goal": "Задействовать объявленные, но пустые поля симуляции.",
+      "tasks": [
+        "Торговец/магазин, трата currency (zn-sim/src/lib.rs:547,745); LIGHT_ARMOR и гашение урона (items.rs:75,154)",
+        "Перезарядка и пополнение патронов; урон по своим при ExtractionSuccess",
+        "Отдача и разброс с детерминированным seed, согласованным клиент+сервер",
+        "Настройки (чувствительность, громкость) и выбор карты в zn-client/src/settings.rs и ui.rs"
+      ],
+      "criteria": [
+        ">=270 тестов",
+        "тесты: currency не уходит в минус, броня гасит N урона, детерминизм разброса на 1000 выстрелов",
+        "интеграционный тест F3 ловит рассинхрон клиент/сервер"
+      ],
+      "metric_source": "cargo test --workspace, ci/artifacts/load.json",
+      "depends": "F3",
+      "risks": "Клиентский урон запрещён REJECTED.md:11 — вся математика в zn-sim"
+    },
+    {
+      "id": "F5",
+      "version": "v0.8.0",
+      "priority": "P2",
+      "status": "planned",
+      "title": "Мир и содержание",
+      "goal": "Расширить контент и физику, не ломая авторитарность.",
+      "tasks": [
+        "Skill + квесты; аномалии/артефакты через zn_sim::ids",
+        "maps/third.ron через ZoneMap; мипмапы на втором пути загрузки; несколько примитивов glTF",
+        "Музыка/3D-звук и анимации поверх 6 SFX; редактор: мышь, undo, превью (писать ZoneMap целиком)",
+        "Серверный PhysicsWorld за feature flag + ООББ вместо AABB; изменение Welcome.obstacles -> протокол 10",
+        "Матчмейкинг/группы без общего таймера"
+      ],
+      "criteria": [
+        ">=310 тестов",
+        "3 карты проходят ZoneMap::validate(); >=10 тестов PhysicsWorld",
+        "бюджет тика вырос не более чем на 10%"
+      ],
+      "metric_source": "maps/, logs/metrics.jsonl",
+      "depends": "F3, F4",
+      "risks": "Полная физика каждой пули запрещена; bbox-правки требуют протокола 10"
+    },
+    {
+      "id": "F6",
+      "version": "v0.9.0",
+      "priority": "P3",
+      "status": "planned",
+      "title": "Инструменты и гигиена",
+      "goal": "Устранить рассинхрон документации и процессов.",
+      "tasks": [
+        "zn-tools/Cargo.toml: явный [[bin]] name = zn-editor, поправить ci.yml manifest",
+        "rustfmt.toml, clippy.toml, deny.toml, [profile.release], Dockerfile, docker-compose, docs/",
+        "deploy/watchdog.ps1 -> сервис + healthcheck; deploy/README.md под TLS",
+        "Postgres-фича: db/dialect.rs либо явное удаление + D34",
+        "launcher/main.js:199 verifyUpdateCodeSignature = false -> true — релизное решение владельца: package.json signAndEditExecutable: false и сертификата нет, включение отклонит неподписанные обновления; нужны сертификат и CSC_LINK в CI",
+        "Синхронизировать память: DECISIONS.md D27 устарело, AGENTS.md/PITFALLS.md под ключи сессий, закрытые пункты OPEN.md в journal"
+      ],
+      "criteria": [
+        "cargo run -p zn-tools --bin zn-editor резолвится",
+        "4 проверки + check-versions.js зелёные; ROADMAP.md покрывает P0-P3 без ручных правок",
+        "MEMORY.md <=150 строк; подпись обновлений либо включена с сертификатом, либо явно отложена с записью в DECISIONS.md"
+      ],
+      "metric_source": "AGENTS.md, .workbuddy-ai/memory/",
+      "depends": "F5",
+      "risks": "Миграции без rollback — только аддитивные SQL, тест на копии zona.db"
+    },
+    {
+      "id": "F7",
+      "version": "v1.0.0",
+      "priority": "P3",
+      "status": "planned",
+      "title": "Замкнутая петля: приёмка",
+      "goal": "Стабилизация и доказательство, что петля работает без человека.",
+      "tasks": [
+        "Полный проход GUI_CHECKLIST.md владельцем: сетки, перенос/поворот, Settings, RTT, откат, смерть/эвакуация, три карты",
+        "Живая сеть 2+ клиентов: реальный RTT, дельты, реконнект, нагрузочный отчёт",
+        "Итоговый self-check: ROADMAP.md со статусами/метриками, CHANGELOG.md, next-step.md, 0 регрессий",
+        "journal/<дата>.md с числами и хешами; релиз v1.0.0 только по явному запросу владельца"
+      ],
+      "criteria": [
+        ">=360 тестов (ориентир)",
+        "0 непройденных пунктов GUI-чека кроме явно принятых",
+        "0 регрессий метрик; зелёный CI без ручного вмешательства в ROADMAP.md"
+      ],
+      "metric_source": "GUI_CHECKLIST.md, ci/artifacts/load.json",
+      "depends": "F6",
+      "risks": "GUI-проверку выполняет только владелец; релиз — только по явному запросу"
+    }
+  ]
+}

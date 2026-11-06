@@ -20,3 +20,7 @@ Thumbs.db
 dist/
 dist_test/
 logs/
+# артефакты петли уробороса (генерируются ci/self-check.js)
+# tests.json отслеживается: хранит предыдущее число тестов для проверки регрессии
+ci/artifacts/*
+!ci/artifacts/tests.json

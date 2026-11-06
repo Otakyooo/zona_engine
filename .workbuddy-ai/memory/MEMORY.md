@@ -11,6 +11,8 @@
 | `journal/YYYY-MM-DD.md` | Дневник: что сделано, зачем, проверки, числа |
 | `../archive/` | Устаревшие артефакты (например `manifest-v0.1.6.json`) |
 | `GUI_CHECKLIST.md` | Чек-лист живой GUI-проверки (выполняет владелец) |
+| `../../ci/roadmap.yaml` | Единственный редактируемый источник `ROADMAP.md`: фазы, статусы, критерии |
+| `../../ROADMAP.md`, `../../CHANGELOG.md` | Генерируются `ci/self-check.js` — вручную не править |
 
 ## Что это за проект
 
@@ -24,7 +26,7 @@ Extraction-shooter в стиле Stalker/Zone: собственный движо
 ## Расположение
 
 - Каноническая папка с 2026-11-05: `C:\Users\russi\WorkBuddy AI\ai_games\zona_engine` — путь с пробелом, квотировать в shell.
-- Синхронизировано из `E:\zona_engine` 2026-11-05: исходники, `.git`, память агента, `zona.db`, offline-payload; проверены число файлов, сумма байт, `git status` и HEAD `1e9735b` (это HEAD на момент переноса, а не текущий — актуальную историю смотреть в `git log` и `journal/`). Кэши `target/` и `launcher/node_modules/` не переносились — восстанавливаются сборкой и `npm install`.
+- Синхронизировано из `E:\zona_engine` 2026-11-05: исходники, `.git`, память агента, `zona.db`, offline-payload; проверены число файлов, сумма байт, `git status` и HEAD `1e9735b` (это HEAD на момент переноса, а не текущий — актуальную историю смотреть в `git log` и `journal/`). Кэши `target/` (~9,1 ГБ) и `launcher/node_modules/` (~550 МБ) после пересборки уже на месте; не удалять.
 - `C:\Users\russi\WorkBuddy AI\Zona_games` — устаревший клон на v0.1.9, не источник правды.
 - `E:\Zona_game` — собранный дистрибутив игры (бинари + ассеты), лежит отдельно от репозитория.
 - Remote: `https://github.com/Otakyooo/zona_engine`, ветка `main`.
