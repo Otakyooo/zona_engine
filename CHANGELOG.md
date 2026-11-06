@@ -1,6 +1,6 @@
 # CHANGELOG
 
-> **Сгенерировано автоматически** `ci/self-check.js` по тегам и Conventional Commits. Не редактировать вручную.
+> **Сгенерировано автоматически** `ci/self-check.js` по списку `releases` из `ci/roadmap.yaml` и Conventional Commits. Не редактировать вручную.
 
 ## v0.3.1
 

@@ -84,6 +84,13 @@ function loadRoadmap() {
       fail('ci/roadmap.yaml: нет непустого массива phases');
       return null;
     }
+    // Список релизов фиксирован в источнике: живые `git tag` расходятся между
+    // локальной машиной и CI (например v0.1.7 есть только локально), из-за чего
+    // CHANGELOG.md перегенерировался бы с разным содержимым на каждом push.
+    if (!Array.isArray(data.releases) || data.releases.length === 0) {
+      fail('ci/roadmap.yaml: нужен непустой массив releases (фиксированный список тегов для CHANGELOG.md)');
+      return null;
+    }
     for (const p of data.phases) {
       for (const key of ['id', 'version', 'priority', 'status', 'title', 'goal', 'tasks', 'criteria']) {
         if (!(key in p)) fail(`ci/roadmap.yaml: у фазы ${p.id || '?'} нет поля ${key}`);
@@ -286,7 +293,7 @@ function renderRoadmap(data, facts, tests) {
   }
   L.push('## Как замыкается петля');
   L.push('');
-  L.push('`ci/self-check.js` читает `ci/roadmap.yaml`, `Cargo.toml`, `PROTOCOL_VERSION` и `MAX_FRAME_BYTES` из `crates/engine/zn-net/src/lib.rs`, число тестов из `ci/artifacts/tests.json` (или `ZONA_TEST_COUNT`/`--with-cargo`), а также `git log` и список тегов. Из этого он генерирует этот файл, `CHANGELOG.md` и неотслеживаемые черновики `ci/artifacts/next-step.md`, `journal-draft.md`, `CHANGELOG-unreleased.md`; при регрессии числа тестов и расхождении версий падает. В CI `ROADMAP.md` коммитится только при реальном diff и с `[skip ci]`, иначе возник бы бесконечный цикл. Чтение `logs/metrics.jsonl`, `ci/artifacts/load.json`, `OPEN.md` и `GUI_CHECKLIST.md` запланировано в Фазе 3. Живую GUI-проверку вносит только владелец.');
+  L.push('`ci/self-check.js` читает `ci/roadmap.yaml` (включая фиксированный список `releases`), `Cargo.toml`, `PROTOCOL_VERSION` и `MAX_FRAME_BYTES` из `crates/engine/zn-net/src/lib.rs`, число тестов из `ci/artifacts/tests.json` (или `ZONA_TEST_COUNT`/`--with-cargo`), а также `git log`. Из этого он генерирует этот файл, `CHANGELOG.md` и неотслеживаемые черновики `ci/artifacts/next-step.md`, `journal-draft.md`, `CHANGELOG-unreleased.md`; при регрессии числа тестов и расхождении версий падает. В CI `ROADMAP.md` коммитится только при реальном diff и с `[skip ci]`, иначе возник бы бесконечный цикл. Чтение `logs/metrics.jsonl`, `ci/artifacts/load.json`, `OPEN.md` и `GUI_CHECKLIST.md` запланировано в Фазе 3. Живую GUI-проверку вносит только владелец.');
   L.push('');
   L.push('## Сквозные правила');
   L.push('');
@@ -311,9 +318,11 @@ function renderRoadmap(data, facts, tests) {
 
 // Отслеживаемый CHANGELOG — чистая функция тегов: он не меняется между
 // релизами, поэтому CI не создаёт шумные автокоммиты.
-function renderChangelog() {
-  const tags = git(['tag', '--list', '--sort=version:refname'], '').split(/\r?\n/).filter(Boolean);
-  const L = ['# CHANGELOG', '', '> **Сгенерировано автоматически** `ci/self-check.js` по тегам и Conventional Commits. Не редактировать вручную.', ''];
+function renderChangelog(data) {
+  // Не читаем `git tag`: набор тегов различается локально и в CI. Источник —
+  // фиксированный releases из ci/roadmap.yaml (теги, реально есть на remote).
+  const tags = data.releases;
+  const L = ['# CHANGELOG', '', '> **Сгенерировано автоматически** `ci/self-check.js` по списку `releases` из `ci/roadmap.yaml` и Conventional Commits. Не редактировать вручную.', ''];
   for (let i = tags.length - 1; i >= 0; i -= 1) {
     const tag = tags[i];
     const range = i > 0 ? `${tags[i - 1]}..${tag}` : tag;
@@ -395,7 +404,7 @@ if (doVerify) verify(facts, roadmap, tests);
 if (doGenerate) {
   const outputs = [
     ['ROADMAP.md', renderRoadmap(roadmap, facts, tests)],
-    ['CHANGELOG.md', renderChangelog()],
+    ['CHANGELOG.md', renderChangelog(roadmap)],
     ['ci/artifacts/CHANGELOG-unreleased.md', renderUnreleased(facts)],
     ['ci/artifacts/next-step.md', renderNextStep(roadmap, facts, tests)],
     ['ci/artifacts/journal-draft.md', renderJournalDraft(roadmap, facts, tests)],

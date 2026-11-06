@@ -208,7 +208,7 @@
 
 ## Как замыкается петля
 
-`ci/self-check.js` читает `ci/roadmap.yaml`, `Cargo.toml`, `PROTOCOL_VERSION` и `MAX_FRAME_BYTES` из `crates/engine/zn-net/src/lib.rs`, число тестов из `ci/artifacts/tests.json` (или `ZONA_TEST_COUNT`/`--with-cargo`), а также `git log` и список тегов. Из этого он генерирует этот файл, `CHANGELOG.md` и неотслеживаемые черновики `ci/artifacts/next-step.md`, `journal-draft.md`, `CHANGELOG-unreleased.md`; при регрессии числа тестов и расхождении версий падает. В CI `ROADMAP.md` коммитится только при реальном diff и с `[skip ci]`, иначе возник бы бесконечный цикл. Чтение `logs/metrics.jsonl`, `ci/artifacts/load.json`, `OPEN.md` и `GUI_CHECKLIST.md` запланировано в Фазе 3. Живую GUI-проверку вносит только владелец.
+`ci/self-check.js` читает `ci/roadmap.yaml` (включая фиксированный список `releases`), `Cargo.toml`, `PROTOCOL_VERSION` и `MAX_FRAME_BYTES` из `crates/engine/zn-net/src/lib.rs`, число тестов из `ci/artifacts/tests.json` (или `ZONA_TEST_COUNT`/`--with-cargo`), а также `git log`. Из этого он генерирует этот файл, `CHANGELOG.md` и неотслеживаемые черновики `ci/artifacts/next-step.md`, `journal-draft.md`, `CHANGELOG-unreleased.md`; при регрессии числа тестов и расхождении версий падает. В CI `ROADMAP.md` коммитится только при реальном diff и с `[skip ci]`, иначе возник бы бесконечный цикл. Чтение `logs/metrics.jsonl`, `ci/artifacts/load.json`, `OPEN.md` и `GUI_CHECKLIST.md` запланировано в Фазе 3. Живую GUI-проверку вносит только владелец.
 
 ## Сквозные правила
 
